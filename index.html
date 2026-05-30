@@ -481,13 +481,21 @@ function clearQ(){Q=[];document.getElementById('qlist').innerHTML='';document.ge
 // PROCESS
 let ocrWorker = null;
 
-async function getOCRWorker() {
-  if (ocrWorker) return ocrWorker;
+async function getOCRWorker(mode) {
+  // mode: 'block' (psm 6) for isolated regions, 'auto' (psm 3) for full page, 'sparse' (psm 11) for scattered text
+  if (ocrWorker) {
+    // Update pageseg_mode dynamically per job
+    const psm = mode === 'auto' ? '3' : mode === 'sparse' ? '11' : '6';
+    await ocrWorker.setParameters({ tessedit_pageseg_mode: psm });
+    return ocrWorker;
+  }
   ocrWorker = await Tesseract.createWorker('spa', 1, { logger: () => {} });
   await ocrWorker.setParameters({
-    tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz:.- /',
-    tessedit_pageseg_mode: '6',
+    // Include Ñ and accented chars; keep digits prominent
+    tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÑñáéíóúÁÉÍÓÚ:.- /',
+    tessedit_pageseg_mode: '3',
     preserve_interword_spaces: '1',
+    tessedit_ocr_engine_mode: '1',  // LSTM only — more accurate
   });
   return ocrWorker;
 }
@@ -500,6 +508,8 @@ function buildCanvas(img, opts = {}) {
     contrast = 1.5, brightness = 1.05,
     grayscale = true, sharpen = false,
     invert = false, rotate = 0,
+    threshold = 155,  // configurable per job — higher = keep more gray pixels
+    binarize = true,  // can skip binarization for some jobs
   } = opts;
 
   const sw = img.naturalWidth, sh = img.naturalHeight;
@@ -516,7 +526,6 @@ function buildCanvas(img, opts = {}) {
   let f = '';
   if (grayscale) f += 'grayscale(1) ';
   f += `contrast(${contrast}) brightness(${brightness}) `;
-  if (sharpen) f += 'saturate(0) ';
   ctx.filter = f.trim();
   ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, outW, outH);
 
@@ -531,16 +540,40 @@ function buildCanvas(img, opts = {}) {
     ctx.putImageData(id, 0, 0);
   }
 
-  // Adaptive threshold — make dark text pop
-  ctx.filter = 'none';
-  const id2 = ctx.getImageData(0, 0, outW, outH);
-  const d = id2.data;
-  for (let i = 0; i < d.length; i += 4) {
-    const lum = 0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2];
-    const val = lum < 140 ? 0 : 255;
-    d[i] = d[i+1] = d[i+2] = val;
+  // Adaptive binarization — configurable threshold
+  if (binarize) {
+    ctx.filter = 'none';
+    const id2 = ctx.getImageData(0, 0, outW, outH);
+    const d = id2.data;
+    // Local adaptive: compute mean of neighborhood to handle uneven lighting
+    const w = outW, h = outH;
+    const gray = new Uint8Array(w * h);
+    for (let i = 0; i < d.length; i += 4) {
+      gray[i >> 2] = Math.round(0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]);
+    }
+    // Simple mean over 15x15 block for local threshold
+    const blockR = 15;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        let sum = 0, cnt = 0;
+        for (let dy = -blockR; dy <= blockR; dy++) {
+          const ny = y + dy;
+          if (ny < 0 || ny >= h) continue;
+          for (let dx = -blockR; dx <= blockR; dx++) {
+            const nx = x + dx;
+            if (nx < 0 || nx >= w) continue;
+            sum += gray[ny * w + nx]; cnt++;
+          }
+        }
+        const localMean = sum / cnt;
+        const px = (y * w + x) * 4;
+        // Use local mean + fixed offset; pixel is black if darker than local average
+        const val = gray[y * w + x] < (localMean - 8) ? 0 : 255;
+        d[px] = d[px+1] = d[px+2] = val;
+      }
+    }
+    ctx.putImageData(id2, 0, 0);
   }
-  ctx.putImageData(id2, 0, 0);
 
   return c;
 }
@@ -557,33 +590,40 @@ function loadImage(dataUrl) {
 async function ocrExtract(item) {
   try {
     const img = await loadImage(item.dataUrl);
-    const worker = await getOCRWorker();
 
-    // Define scan jobs: each gets a canvas variant and we collect all text
+    // Scan jobs: each targets a specific region/purpose with tuned params
+    // mode: 'auto'=PSM3 full page, 'block'=PSM6 uniform block, 'sparse'=PSM11 sparse text
     const jobs = [
-      // Full image — normal
-      { opts: { rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:1.6, brightness:1.05 } },
-      // Full image — high contrast
-      { opts: { rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:2.2, brightness:1.1 } },
-      // Full image — inverted (dark bg white text sometimes)
-      { opts: { rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:1.8, brightness:1.0, invert:true } },
-      // Top half only (header area — BF code, COD territorial, campaña)
-      { opts: { rx:0, ry:0, rw:1, rh:0.55, scale:3.0, contrast:1.8, brightness:1.05 } },
-      // Top-right region — BF code specifically
-      { opts: { rx:0.50, ry:0.0, rw:0.50, rh:0.30, scale:4.0, contrast:2.0, brightness:1.1 } },
-      // Center region — COD consultora
-      { opts: { rx:0.25, ry:0.28, rw:0.55, rh:0.30, scale:4.0, contrast:2.0, brightness:1.1 } },
-      // Left column — CAMPAÑA field
-      { opts: { rx:0.0, ry:0.28, rw:0.45, rh:0.25, scale:4.0, contrast:1.8, brightness:1.05 } },
+      // ① Full image — auto layout detection (PSM 3), softer binarization
+      { mode:'auto', opts:{ rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:1.5, brightness:1.05, binarize:true } },
+      // ② Full image — high contrast (catches faded prints)
+      { mode:'auto', opts:{ rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:2.0, brightness:1.1, binarize:true } },
+      // ③ Full image — inverted (white-on-dark regions)
+      { mode:'auto', opts:{ rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:1.8, brightness:1.0, invert:true, binarize:true } },
+      // ④ Top half — header area (BF code, COD territorial, campaña) — PSM 6 uniform block
+      { mode:'block', opts:{ rx:0, ry:0, rw:1, rh:0.50, scale:3.0, contrast:1.8, brightness:1.05, binarize:true } },
+      // ⑤ Top-right — BF/pedido number zone — PSM 11 sparse (number may be isolated)
+      { mode:'sparse', opts:{ rx:0.45, ry:0.0, rw:0.55, rh:0.28, scale:4.5, contrast:2.2, brightness:1.1, binarize:true } },
+      // ⑥ Top-right alternate — slightly wider/taller if BF is lower
+      { mode:'sparse', opts:{ rx:0.40, ry:0.0, rw:0.60, rh:0.38, scale:4.0, contrast:2.0, brightness:1.1, binarize:true } },
+      // ⑦ Center — COD consultora (99...) — PSM 6
+      { mode:'block', opts:{ rx:0.20, ry:0.25, rw:0.60, rh:0.32, scale:4.0, contrast:2.0, brightness:1.1, binarize:true } },
+      // ⑧ Left/center — CAMPAÑA field — PSM 6
+      { mode:'block', opts:{ rx:0.0, ry:0.25, rw:0.50, rh:0.28, scale:4.0, contrast:1.8, brightness:1.05, binarize:true } },
+      // ⑨ Bottom half — zona territorial (often in lower section) — PSM 3
+      { mode:'auto', opts:{ rx:0, ry:0.45, rw:1, rh:0.55, scale:3.0, contrast:1.7, brightness:1.05, binarize:true } },
+      // ⑩ No binarization pass — raw enhanced (catches light-gray prints binarize kills)
+      { mode:'auto', opts:{ rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:2.5, brightness:1.15, binarize:false } },
     ];
 
     const allTexts = [];
     for (const job of jobs) {
       try {
+        const worker = await getOCRWorker(job.mode);
         const canvas = buildCanvas(img, job.opts);
         const { data: { text } } = await worker.recognize(canvas);
         if (text && text.trim()) allTexts.push(text);
-      } catch(e) { /* continue */ }
+      } catch(e) { /* continue on job failure */ }
     }
 
     const combined = allTexts.join('\n');
@@ -605,85 +645,145 @@ async function ocrExtract(item) {
 function parseOCRText(item, combined, allTexts) {
   const lines = combined.split('\n').map(l => l.trim()).filter(Boolean);
 
+  // Helper: strip all non-digits
+  const digits = s => s.replace(/\D/g, '');
+
   // ── 1. Nº PEDIDO ─────────────────────────────────────────
-  // Siempre 10 digitos empezando por 26. Esquina superior derecha (BF-XXXXXXXXXX)
-  // Scan all texts for 26XXXXXXXX pattern
+  // 10 dígitos empezando por 26. A veces precedido de "BF", "BF-", "BF ."
   if (!item.pedido) {
-    const allNums = combined.match(/\d{8,12}/g) || [];
-    for (const n of allNums) {
-      if (n.length === 10 && n.startsWith('26')) { item.pedido = n; break; }
+    // Priority: BF prefix match (most reliable signal)
+    const bfMatch = combined.match(/B\s*[F\.]\s*[-\.\s]*([0-9\s]{8,14})/gi);
+    if (bfMatch) {
+      for (const m of bfMatch) {
+        const d = digits(m);
+        // Extract the trailing 10-digit number starting with 26
+        const sub = d.match(/26\d{8}/);
+        if (sub) { item.pedido = sub[0]; break; }
+      }
     }
   }
-  // Also try stripping common prefixes
   if (!item.pedido) {
-    const prefixMatch = combined.match(/[A-Z]{1,3}[\s\-\.]*([26][0-9]{9})/gi) || [];
-    for (const m of prefixMatch) {
-      const nums = m.replace(/[^0-9]/g,'');
-      if (nums.length === 10 && nums.startsWith('26')) { item.pedido = nums; break; }
+    // Scan every sequence of digits in combined text
+    const allNums = combined.match(/\d[\d\s]{7,13}\d/g) || [];
+    for (const raw of allNums) {
+      const d = digits(raw);
+      if (d.length === 10 && d.startsWith('26')) { item.pedido = d; break; }
+    }
+  }
+  if (!item.pedido) {
+    // Looser: any 10-digit run starting with 26 (even embedded in longer strings)
+    const m = combined.match(/\b26\d{8}\b/);
+    if (m) item.pedido = m[0];
+  }
+  if (!item.pedido) {
+    // Last resort: 26 followed by any 8 digits with possible OCR noise chars between
+    const m = combined.match(/2\s*6\s*(\d[\s\d]{6,10}\d)/);
+    if (m) {
+      const d = '26' + digits(m[1]);
+      if (d.length === 10) item.pedido = d;
     }
   }
 
   // ── 2. ID CONSULTORA ──────────────────────────────────────
-  // 10 digitos empezando por 99. Aparece como "COD: 99XXXXXXXX"
+  // 10 dígitos empezando por 99
   if (!item.consultora) {
-    // First try after COD label
-    const codMatch = combined.match(/COD[:\s\.]*([9][9]\d{8})/i);
-    if (codMatch) item.consultora = codMatch[1];
+    // Priority: COD label + 99XXXXXXXX
+    const codMatch = combined.match(/COD[EI]?\s*[:\.#]?\s*(9\s*9[\s\d]{7,12}\d)/i);
+    if (codMatch) {
+      const d = digits(codMatch[1]);
+      if (d.length === 10 && d.startsWith('99')) item.consultora = d;
+    }
   }
   if (!item.consultora) {
-    const allNums = combined.match(/\d{10}/g) || [];
-    for (const n of allNums) {
-      if (n.startsWith('99')) { item.consultora = n; break; }
+    // Any 10-digit sequence starting with 99
+    const allNums = combined.match(/\d[\d\s]{7,13}\d/g) || [];
+    for (const raw of allNums) {
+      const d = digits(raw);
+      if (d.length === 10 && d.startsWith('99')) { item.consultora = d; break; }
+    }
+  }
+  if (!item.consultora) {
+    const m = combined.match(/\b99\d{8}\b/);
+    if (m) item.consultora = m[0];
+  }
+  if (!item.consultora) {
+    // OCR sometimes splits: 99 then space then 8 digits
+    const m = combined.match(/9\s*9\s*(\d[\s\d]{6,10}\d)/);
+    if (m) {
+      const d = '99' + digits(m[1]);
+      if (d.length === 10) item.consultora = d;
     }
   }
 
   // ── 3. CAMPAÑA ────────────────────────────────────────────
-  // 6 digitos empezando por 20. Aparece bajo la etiqueta CAMPAÑA
+  // 6 dígitos empezando por 20 (e.g. 202607)
   if (!item.campana) {
-    // Look for CAMPAÑA label then number on same or next line
-    const campMatch = combined.match(/CAMPA[^\n]{0,10}(\b20\d{4}\b)/i);
+    // Near CAMPA label — same or next line
+    const campMatch = combined.match(/CAMPA[^\n]{0,15}?(\b20\d{4}\b)/i);
     if (campMatch) item.campana = campMatch[1];
   }
   if (!item.campana) {
-    // Scan line by line: if line contains CAMPA, check same line or next
     for (let i = 0; i < lines.length; i++) {
       if (/CAMPA/i.test(lines[i])) {
+        // Check same line
         const same = lines[i].match(/\b(20\d{4})\b/);
         if (same) { item.campana = same[1]; break; }
-        if (lines[i+1]) {
-          const next = lines[i+1].match(/^(20\d{4})$/);
-          if (next) { item.campana = next[1]; break; }
-          const nextAny = lines[i+1].match(/\b(20\d{4})\b/);
-          if (nextAny) { item.campana = nextAny[1]; break; }
+        // Check next 2 lines
+        for (let j = 1; j <= 2; j++) {
+          if (!lines[i+j]) continue;
+          const nxt = lines[i+j].match(/\b(20\d{4})\b/);
+          if (nxt) { item.campana = nxt[1]; break; }
         }
+        if (item.campana) break;
       }
     }
   }
   if (!item.campana) {
-    // Last resort: any standalone 6-digit number starting with 20
-    // but NOT a phone (10 digits) and NOT a pedido or consultora
-    const m = combined.match(/\b(20\d{4})\b/);
+    // Standalone 6-digit number starting with 20 (but not confused with pedido/consultora)
+    const m = combined.match(/(?<!\d)(20\d{4})(?!\d)/);
     if (m) item.campana = m[1];
   }
 
   // ── 4. ZONA TERRITORIAL ───────────────────────────────────
-  // Formato: "141409E 21084" — letras+numeros espacio numeros
+  // Formato típico: "141409E 21084" o "1614210 21802" o "141421C 21802"
+  // Estructura: 5-7 alfanuméricos + espacio + 4-6 dígitos
   if (!item.zona) {
-    const zonaMatch = combined.match(/TERRITORIAL[\s:\.]+([A-Z0-9]{5,8}\s+\d{4,6})/i);
-    if (zonaMatch) item.zona = zonaMatch[1].replace(/\s+/g,' ').trim();
+    // Near TERRITORIAL label
+    const tMatch = combined.match(/TERRITORIAL[\s:\.]*([A-Z0-9]{4,9}[\s\-]+[0-9]{4,6})/i);
+    if (tMatch) item.zona = tMatch[1].replace(/\s+/g,' ').trim();
   }
   if (!item.zona) {
-    // Pattern: 6 alphanumeric chars (with letter) + space + 5 digits
-    const zonaRaw = combined.match(/\b([0-9]{5,6}[A-Z][A-Z]?\s+[0-9]{4,6})\b/i);
+    // Near COD TERRITORIAL — number may be on next line
+    for (let i = 0; i < lines.length; i++) {
+      if (/TERRITORIAL/i.test(lines[i])) {
+        // Try same line first
+        const same = lines[i].match(/([A-Z0-9]{4,9}\s+[0-9]{4,6})/i);
+        if (same) { item.zona = same[1].replace(/\s+/g,' ').trim(); break; }
+        // Try next line (zona may be split onto next line)
+        if (lines[i+1]) {
+          const nxt = lines[i+1].match(/^([A-Z0-9]{4,9}(?:\s+[0-9]{4,6})?)/i);
+          if (nxt) {
+            // If the next line only has first part, grab the one after too
+            let zona = nxt[1].replace(/\s+/g,' ').trim();
+            if (!/\s/.test(zona) && lines[i+2]) {
+              const nxt2 = lines[i+2].match(/^([0-9]{4,6})/);
+              if (nxt2) zona += ' ' + nxt2[1];
+            }
+            item.zona = zona; break;
+          }
+        }
+      }
+    }
+  }
+  if (!item.zona) {
+    // Pattern: digits+optional letter(s) + space + digits (typical zona format)
+    const zonaRaw = combined.match(/\b(\d{5,7}[A-Z]{0,2}\s+\d{4,6})\b/i);
     if (zonaRaw) item.zona = zonaRaw[1].replace(/\s+/g,' ').trim();
   }
   if (!item.zona) {
-    for (const line of lines) {
-      if (/TERRITORIAL/i.test(line)) {
-        const m = line.match(/([A-Z0-9]{5,9}\s+[0-9]{4,6})/i);
-        if (m) { item.zona = m[1].replace(/\s+/g,' ').trim(); break; }
-      }
-    }
+    // Alphanumeric code with embedded letter: e.g. 141421C 21802
+    const zonaRaw2 = combined.match(/\b([0-9]{4,6}[A-Z][A-Z]?\s+[0-9]{4,6})\b/i);
+    if (zonaRaw2) item.zona = zonaRaw2[1].replace(/\s+/g,' ').trim();
   }
 }
 
