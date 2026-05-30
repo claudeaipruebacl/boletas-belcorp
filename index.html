@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Boletas Belcorp</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0f0e0d;--surface:#1a1917;--surface2:#242220;--border:#2e2c29;--accent:#e8c547;--accent2:#e87d3e;--text:#f0ede8;--muted:#7a7670;--ok:#4caf7d;--err:#e85555;--warn:#e8a83e;--fh:'Syne',sans-serif;--fm:'DM Mono',monospace}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:var(--fm);min-height:100vh}
+header{border-bottom:1px solid var(--border);padding:18px 28px;display:flex;align-items:center;gap:14px;background:var(--surface);position:sticky;top:0;z-index:50}
+.logo{width:34px;height:34px;background:var(--accent);border-radius:6px;display:flex;align-items:center;justify-content:center;font-family:var(--fh);font-weight:800;font-size:15px;color:#0f0e0d}
+header h1{font-family:var(--fh);font-size:17px;font-weight:700}
+header span{font-size:11px;color:var(--muted);margin-left:4px}
+.hr{margin-left:auto;display:flex;gap:8px}
+.tab{background:none;border:1px solid var(--border);color:var(--muted);font-family:var(--fm);font-size:12px;padding:6px 14px;border-radius:4px;cursor:pointer;transition:all .15s}
+.tab.active,.tab:hover{border-color:var(--accent);color:var(--accent);background:rgba(232,197,71,.06)}
+.wrap{max-width:1100px;margin:0 auto;padding:28px}
+.panel{display:none}.panel.active{display:block}
+/* DROP */
+.dz{border:1.5px dashed var(--border);border-radius:12px;padding:40px 24px;text-align:center;cursor:pointer;transition:all .2s;position:relative;background:var(--surface);margin-bottom:24px}
+.dz:hover,.dz.over{border-color:var(--accent);background:rgba(232,197,71,.04)}
+.dz input{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%}
+.dz h3{font-family:var(--fh);font-size:15px;font-weight:600;margin:10px 0 5px}
+.dz p{font-size:11px;color:var(--muted)}
+.dz .hint{font-size:11px;color:var(--accent);margin-top:6px}
+/* PROGRESS */
+.prog{background:var(--surface2);border-radius:4px;height:4px;margin-bottom:18px;overflow:hidden;display:none}
+.prog-fill{height:100%;background:var(--accent);border-radius:4px;transition:width .4s ease;width:0%}
+/* SUMMARY */
+.sumbox{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 18px;margin-bottom:18px;display:none}
+.sumrow{display:flex;gap:24px;flex-wrap:wrap}
+.sumstat{display:flex;align-items:center;gap:6px}
+.sumstat .n{font-size:18px;font-weight:700;font-family:var(--fh)}
+.sumstat .l{color:var(--muted);font-size:11px}
+/* QUEUE HEADER */
+.qh{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.qh h3{font-family:var(--fh);font-size:15px;font-weight:700}
+/* QUEUE ITEM */
+.qi{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;display:grid;grid-template-columns:64px 1fr auto;gap:14px;align-items:start;margin-bottom:10px;transition:border-color .2s}
+.qi.scanning{border-color:var(--accent)}.qi.done{border-color:rgba(76,175,125,.4)}.qi.warning{border-color:rgba(232,168,62,.4)}.qi.error{border-color:rgba(232,85,85,.4)}.qi.saved{border-color:rgba(76,175,125,.6)}
+.thumb{width:64px;height:54px;object-fit:cover;border-radius:6px;background:var(--surface2)}
+.fname{font-size:10px;color:var(--muted);margin-bottom:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.ifields{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+@media(max-width:700px){.ifields{grid-template-columns:1fr 1fr}}
+.ifield label{display:block;font-size:9px;color:var(--muted);text-transform:uppercase;letter-spacing:.7px;margin-bottom:3px}
+.ifield input{width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);font-family:var(--fm);font-size:12px;padding:5px 8px;border-radius:5px;outline:none;transition:border-color .15s}
+.ifield input:focus{border-color:var(--accent)}
+.ifield input.hit{border-color:rgba(76,175,125,.5);color:var(--ok)}
+.ifield input.miss{border-color:rgba(232,168,62,.4)}
+.ist{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:76px;padding-top:2px}
+.pill{font-size:10px;padding:3px 10px;border-radius:20px;white-space:nowrap;font-weight:500;text-align:center}
+.pill.scanning{background:rgba(232,197,71,.12);color:var(--accent)}
+.pill.done{background:rgba(76,175,125,.12);color:var(--ok)}
+.pill.warning{background:rgba(232,168,62,.12);color:var(--warn)}
+.pill.error{background:rgba(232,85,85,.12);color:var(--err)}
+.pill.pending{background:var(--surface2);color:var(--muted)}
+.pill.saved{background:rgba(76,175,125,.2);color:var(--ok)}
+.brm{background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;padding:2px 4px;transition:color .15s;line-height:1}
+.brm:hover{color:var(--err)}
+/* BUTTONS */
+.bp{background:var(--accent);color:#0f0e0d;border:none;font-family:var(--fh);font-weight:700;font-size:13px;padding:11px 26px;border-radius:8px;cursor:pointer;transition:all .15s}
+.bp:hover{background:#f0d060;transform:translateY(-1px)}.bp:disabled{background:var(--border);color:var(--muted);cursor:not-allowed;transform:none}
+.bs{background:none;border:1px solid var(--border);color:var(--text);font-family:var(--fm);font-size:12px;padding:10px 18px;border-radius:8px;cursor:pointer;transition:all .15s}
+.bs:hover{border-color:var(--accent2);color:var(--accent2)}
+.arow{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px}
+/* TABLE */
+.rh{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.rh h3{font-family:var(--fh);font-size:16px;font-weight:700}
+.badge{background:var(--surface2);border:1px solid var(--border);border-radius:20px;padding:3px 10px;font-size:11px;color:var(--muted)}
+.srow{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap}
+.si{flex:1;min-width:160px;background:var(--surface);border:1px solid var(--border);color:var(--text);font-family:var(--fm);font-size:13px;padding:9px 13px;border-radius:8px;outline:none;transition:border-color .15s}
+.si:focus{border-color:var(--accent)}
+.ss{background:var(--surface);border:1px solid var(--border);color:var(--text);font-family:var(--fm);font-size:12px;padding:9px 12px;border-radius:8px;outline:none;cursor:pointer}
+.tw{overflow-x:auto}
+table{width:100%;border-collapse:collapse;font-size:12px}
+thead th{text-align:left;padding:9px 13px;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;border-bottom:1px solid var(--border);font-weight:400;white-space:nowrap}
+tbody tr{border-bottom:1px solid var(--border);transition:background .1s;cursor:pointer}
+tbody tr:hover{background:var(--surface)}
+tbody td{padding:11px 13px;font-family:var(--fm);vertical-align:middle}
+.ca{color:var(--accent);font-weight:500}.cm{color:var(--muted);font-size:11px}
+.cl a{color:var(--accent2);text-decoration:none;font-size:11px;border:1px solid var(--accent2);padding:3px 8px;border-radius:4px;transition:all .1s}
+.cl a:hover{background:rgba(232,125,62,.1)}
+.empty{text-align:center;padding:50px 20px;color:var(--muted)}
+.empty .big{font-size:32px;margin-bottom:8px}
+/* CONFIG */
+.cb{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:20px}
+.cb h4{font-family:var(--fh);font-weight:600;font-size:14px;margin-bottom:4px}
+.cb p{font-size:11px;color:var(--muted);margin-bottom:14px;line-height:1.7}
+.cb input{width:100%;background:var(--surface2);border:1px solid var(--border);color:var(--text);font-family:var(--fm);font-size:12px;padding:9px 13px;border-radius:6px;outline:none;margin-bottom:8px;transition:border-color .15s}
+.cb input:focus{border-color:var(--accent)}
+/* MODAL */
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:200;align-items:center;justify-content:center}
+.mo.open{display:flex}
+.md{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:26px;max-width:480px;width:92%;max-height:90vh;overflow-y:auto}
+.md h3{font-family:var(--fh);font-size:17px;font-weight:700;margin-bottom:14px}
+.md img{width:100%;border-radius:8px;margin-bottom:14px}
+.mdf{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:18px}
+.mdi{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px 13px}
+.mdi .lb{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.7px;margin-bottom:3px}
+.mdi .vl{font-size:13px;color:var(--accent);font-weight:500}
+.mc{background:none;border:1px solid var(--border);color:var(--muted);font-family:var(--fm);font-size:12px;padding:8px 16px;border-radius:6px;cursor:pointer}
+.mc:hover{border-color:var(--err);color:var(--err)}
+/* NOTIF */
+#notif{position:fixed;bottom:22px;right:22px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:13px 18px;font-size:13px;max-width:300px;transform:translateY(60px);opacity:0;transition:all .3s;z-index:1000}
+#notif.show{transform:translateY(0);opacity:1}
+#notif.ok{border-left:3px solid var(--ok)}
+#notif.err{border-left:3px solid var(--err)}
+#notif.warn{border-left:3px solid var(--warn)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.sp{display:inline-block;width:11px;height:11px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;vertical-align:middle;margin-right:4px}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">B</div>
+  <h1>Boletas Belcorp <span>// Gestión de entregas</span></h1>
+  <div class="hr">
+    <button class="tab active" onclick="sw('upload',this)">Subir boletas</button>
+    <button class="tab" onclick="sw('records',this)">Registros</button>
+    <button class="tab" onclick="sw('config',this)">Configuración</button>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- SUBIR -->
+<div class="panel active" id="panel-upload">
+  <div class="dz" id="dz">
+    <input type="file" id="fi" accept="image/*" multiple onchange="addFiles(this.files)">
+    <span style="font-size:30px;display:block;margin-bottom:10px">📂</span>
+    <h3>Arrastra las boletas aquí</h3>
+    <p>Selecciona uno o varios archivos JPG / PNG</p>
+    <p class="hint">Puedes subir varias boletas a la vez — cada una se procesa por separado</p>
+  </div>
+
+  <div class="prog" id="prog"><div class="prog-fill" id="pf"></div></div>
+
+  <div class="sumbox" id="sumbox">
+    <div class="sumrow">
+      <div class="sumstat"><span class="n" id="s-tot">0</span><span class="l">boletas</span></div>
+      <div class="sumstat" style="color:var(--ok)"><span class="n" id="s-ok">0</span><span class="l">detectadas</span></div>
+      <div class="sumstat" style="color:var(--warn)"><span class="n" id="s-w">0</span><span class="l">incompletas</span></div>
+      <div class="sumstat" style="color:var(--err)"><span class="n" id="s-e">0</span><span class="l">con error</span></div>
+    </div>
+  </div>
+
+  <div id="qwrap" style="display:none">
+    <div class="qh">
+      <h3>Cola de procesamiento</h3>
+      <div style="display:flex;gap:8px">
+        <button class="bs" onclick="document.getElementById('fi2').click()" style="font-size:11px;padding:7px 14px">+ Agregar más</button>
+        <input type="file" id="fi2" accept="image/*" multiple style="display:none" onchange="addFiles(this.files)">
+      </div>
+    </div>
+    <div id="qlist"></div>
+    <div class="arow">
+      <button class="bp" id="bsa" onclick="saveAll()" disabled>Guardar todo en Sheets</button>
+      <button class="bs" onclick="clearQ()">Limpiar cola</button>
+      <span id="sstatus" style="font-size:12px;color:var(--muted)"></span>
+    </div>
+  </div>
+</div>
+
+<!-- REGISTROS -->
+<div class="panel" id="panel-records">
+  <div class="rh">
+    <h3>Registros guardados</h3>
+    <span class="badge" id="rcnt">0 boletas</span>
+  </div>
+  <div class="srow">
+    <input class="si" type="text" id="sq" placeholder="Buscar por ID consultora, Nº pedido o campaña..." oninput="filterR()">
+    <select class="ss" id="sf" onchange="filterR()">
+      <option value="all">Todos los campos</option>
+      <option value="consultora">ID Consultora</option>
+      <option value="pedido">Nº Pedido</option>
+      <option value="campana">Campaña</option>
+      <option value="zona">Zona</option>
+    </select>
+  </div>
+  <div class="tw">
+    <table>
+      <thead><tr><th>Campaña</th><th>ID Consultora</th><th>Nº Pedido</th><th>Zona</th><th>Fecha</th><th>Foto</th></tr></thead>
+      <tbody id="rtbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- CONFIG -->
+<div class="panel" id="panel-config">
+  <div class="cb">
+    <h4>URL del Google Apps Script</h4>
+    <p>Despliega el script como Web App en <strong>script.google.com</strong> y pega la URL aquí. Cada boleta se enviará automáticamente a tu Google Sheets.</p>
+    <input type="text" id="cfg-su" placeholder="https://script.google.com/macros/s/XXXXXX/exec" oninput="saveCfg()">
+  </div>
+  <div class="cb">
+    <h4>URL carpeta Google Drive</h4>
+    <p>Carpeta compartida donde se almacenarán las fotos originales de las boletas.</p>
+    <input type="text" id="cfg-du" placeholder="https://drive.google.com/drive/folders/XXXXXX" oninput="saveCfg()">
+  </div>
+  <div class="cb" style="border-color:rgba(232,197,71,.2)">
+    <h4 style="color:var(--accent)">Código Google Apps Script</h4>
+    <p>Crea un proyecto en <strong>script.google.com</strong>, pega este código, guarda y despliega como <strong>Web App</strong> con acceso a cualquier usuario.</p>
+    <pre id="scode" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;font-size:11px;overflow-x:auto;line-height:1.8;color:#9cdcfe;margin-top:8px">function doPost(e) {
+  var data = JSON.parse(e.postData.contents);
+  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(['Campaña','ID Consultora','Nº Pedido','Zona','Fecha','URL Foto']);
+  }
+  sheet.appendRow([data.campana, data.consultora, data.pedido, data.zona, data.fecha, data.urlFoto]);
+  return ContentService.createTextOutput(JSON.stringify({ok:true})).setMimeType(ContentService.MimeType.JSON);
+}</pre>
+    <button class="bs" onclick="copyScript()" style="margin-top:10px;font-size:11px">Copiar código</button>
+  </div>
+</div>
+</div>
+
+<!-- MODAL -->
+<div class="mo" id="mo">
+  <div class="md">
+    <h3>Detalle boleta</h3>
+    <img id="mimg" src="" alt="">
+    <div class="mdf" id="mfields"></div>
+    <button class="mc" onclick="closeMo()">Cerrar</button>
+  </div>
+</div>
+
+<div id="notif"></div>
+
+<script>
+// STATE
+let Q = [];
+let records = JSON.parse(localStorage.getItem('b_rec') || '[]');
+let cfg = JSON.parse(localStorage.getItem('b_cfg') || '{}');
+let busy = false;
+
+document.getElementById('cfg-su').value = cfg.su || '';
+document.getElementById('cfg-du').value = cfg.du || '';
+renderT();
+
+// PANELS
+function sw(name, btn) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(b => b.classList.remove('active'));
+  document.getElementById('panel-' + name).classList.add('active');
+  if (btn) btn.classList.add('active');
+  if (name === 'records') renderT();
+}
+
+// DRAG DROP
+const dz = document.getElementById('dz');
+dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('over'); });
+dz.addEventListener('dragleave', () => dz.classList.remove('over'));
+dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('over'); addFiles(e.dataTransfer.files); });
+
+// ADD FILES
+async function addFiles(files) {
+  if (!files || !files.length) return;
+  dz.style.display = 'none';
+  document.getElementById('qwrap').style.display = 'block';
+  for (const f of Array.from(files)) {
+    const id = Date.now() + '_' + Math.random().toString(36).slice(2);
+    const dataUrl = await toDataUrl(f);
+    const item = { id, file: f, dataUrl, status: 'pending', campana: '', consultora: '', pedido: '', zona: '' };
+    Q.push(item);
+    renderQI(item);
+  }
+  updSum();
+  processQ();
+}
+
+function toDataUrl(f) {
+  return new Promise(r => { const fr = new FileReader(); fr.onload = e => r(e.target.result); fr.readAsDataURL(f); });
+}
+
+// RENDER QUEUE ITEM
+function renderQI(item) {
+  const list = document.getElementById('qlist');
+  const d = document.createElement('div');
+  d.className = 'qi pending'; d.id = 'qi_' + item.id;
+  d.innerHTML = `
+    <img class="thumb" src="${item.dataUrl}" alt="">
+    <div style="min-width:0">
+      <div class="fname">${item.file.name}</div>
+      <div class="ifields">
+        <div class="ifield"><label>Campaña</label><input id="ic_${item.id}" type="text" placeholder="—" oninput="uf('${item.id}','campana',this.value)"></div>
+        <div class="ifield"><label>ID Consultora</label><input id="ii_${item.id}" type="text" placeholder="—" oninput="uf('${item.id}','consultora',this.value)"></div>
+        <div class="ifield"><label>Nº Pedido</label><input id="ip_${item.id}" type="text" placeholder="—" oninput="uf('${item.id}','pedido',this.value)"></div>
+        <div class="ifield"><label>Zona</label><input id="iz_${item.id}" type="text" placeholder="—" oninput="uf('${item.id}','zona',this.value)"></div>
+      </div>
+    </div>
+    <div class="ist">
+      <span class="pill pending" id="sp_${item.id}">Pendiente</span>
+      <button class="brm" onclick="rmItem('${item.id}')" title="Quitar">✕</button>
+    </div>`;
+  list.appendChild(d);
+}
+
+function updQI(item) {
+  const el = document.getElementById('qi_' + item.id); if (!el) return;
+  el.className = 'qi ' + item.status;
+  const pill = document.getElementById('sp_' + item.id);
+  const lbl = { scanning: '<span class="sp"></span>Leyendo…', done: '✓ Listo', warning: '⚠ Revisar', error: '✕ Error', pending: 'Pendiente', saved: '✓ Guardado' };
+  pill.className = 'pill ' + item.status;
+  pill.innerHTML = lbl[item.status] || item.status;
+  const map = { campana:'ic', consultora:'ii', pedido:'ip', zona:'iz' };
+  for (const [f, prefix] of Object.entries(map)) {
+    const inp = document.getElementById(prefix + '_' + item.id); if (!inp) continue;
+    inp.value = item[f] || '';
+    inp.className = item[f] ? 'hit' : (['done','warning','saved'].includes(item.status) ? 'miss' : '');
+  }
+}
+
+function uf(id, field, val) {
+  const item = Q.find(q => q.id === id); if (item) { item[field] = val; updSum(); }
+}
+
+function rmItem(id) {
+  Q = Q.filter(q => q.id !== id);
+  const el = document.getElementById('qi_' + id); if (el) el.remove();
+  updSum();
+  if (!Q.length) { document.getElementById('qwrap').style.display = 'none'; dz.style.display = 'block'; }
+}
+
+function clearQ() {
+  Q = [];
+  document.getElementById('qlist').innerHTML = '';
+  document.getElementById('qwrap').style.display = 'none';
+  dz.style.display = 'block';
+  document.getElementById('sumbox').style.display = 'none';
+  document.getElementById('prog').style.display = 'none';
+  document.getElementById('bsa').disabled = true;
+  document.getElementById('sstatus').textContent = '';
+}
+
+// PROCESS
+async function processQ() {
+  if (busy) return; busy = true;
+  const pending = Q.filter(q => q.status === 'pending');
+  const tot = pending.length; let done = 0;
+  if (tot > 0) { document.getElementById('prog').style.display = 'block'; document.getElementById('pf').style.width = '0%'; }
+  for (const item of pending) {
+    item.status = 'scanning'; updQI(item);
+    await extract(item);
+    done++; document.getElementById('pf').style.width = (done / tot * 100) + '%';
+    updSum();
+  }
+  busy = false;
+  if (Q.length && Q.every(q => ['done','warning','error','saved'].includes(q.status))) {
+    document.getElementById('bsa').disabled = false;
+  }
+}
+
+// EXTRACT
+async function extract(item) {
+  try {
+    const b64 = item.dataUrl.split(',')[1];
+    const mime = item.dataUrl.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514', max_tokens: 400,
+        messages: [{ role: 'user', content: [
+          { type: 'image', source: { type: 'base64', media_type: mime, data: b64 } },
+          { type: 'text', text: `Eres un extractor de datos de boletas de entrega Belcorp/Belstar.
+Extrae exactamente estos 4 campos y responde SOLO con JSON válido sin texto adicional ni backticks:
+{
+  "campana": "número del campo CAMPAÑA (solo dígitos)",
+  "consultora": "número del código de barras que empieza por 99 (solo dígitos sin letras)",
+  "pedido": "número del código de barras de la esquina superior derecha junto a FECHA DE ENTREGA (elimina cualquier prefijo de letras como BF- AF- CF- etc, solo dígitos)",
+  "zona": "valor exacto del campo COD. TERRITORIAL incluyendo letras y números"
+}
+Si no encuentras un campo usa string vacío.` }
+        ]}]
+      })
+    });
+    const data = await res.json();
+    const text = (data.content?.[0]?.text || '').replace(/```json|```/g,'').trim();
+    const p = JSON.parse(text);
+    item.campana = p.campana || ''; item.consultora = p.consultora || '';
+    item.pedido = p.pedido || ''; item.zona = p.zona || '';
+    const req = item.consultora && item.pedido;
+    item.status = req ? (item.campana && item.zona ? 'done' : 'warning') : 'warning';
+  } catch(err) { console.warn(err); item.status = 'error'; }
+  updQI(item);
+}
+
+// SUMMARY
+function updSum() {
+  const box = document.getElementById('sumbox');
+  if (!Q.length) { box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  document.getElementById('s-tot').textContent = Q.length;
+  document.getElementById('s-ok').textContent = Q.filter(q => q.status === 'done' || q.status === 'saved').length;
+  document.getElementById('s-w').textContent = Q.filter(q => q.status === 'warning').length;
+  document.getElementById('s-e').textContent = Q.filter(q => q.status === 'error').length;
+}
+
+// SAVE ALL
+async function saveAll() {
+  const toSave = Q.filter(q => ['done','warning'].includes(q.status));
+  if (!toSave.length) { notify('No hay boletas listas para guardar', 'warn'); return; }
+  document.getElementById('bsa').disabled = true;
+  document.getElementById('sstatus').textContent = 'Guardando ' + toSave.length + ' boletas...';
+  let cnt = 0;
+  for (const item of toSave) {
+    const fecha = new Date().toLocaleString('es-CO', { timeZone: 'America/Bogota' });
+    const urlFoto = cfg.du || '— (configura Drive URL)';
+    records.unshift({ campana: item.campana, consultora: item.consultora, pedido: item.pedido, zona: item.zona, fecha, urlFoto, imageData: item.dataUrl, fileName: item.file.name });
+    if (cfg.su) {
+      try { await fetch(cfg.su, { method: 'POST', mode: 'no-cors', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ campana: item.campana, consultora: item.consultora, pedido: item.pedido, zona: item.zona, fecha, urlFoto }) }); } catch(e) {}
+    }
+    item.status = 'saved'; updQI(item); cnt++;
+  }
+  localStorage.setItem('b_rec', JSON.stringify(records));
+  updRcnt(); updSum();
+  document.getElementById('sstatus').textContent = '✓ ' + cnt + ' boletas guardadas';
+  notify(cnt + ' boletas guardadas' + (cfg.su ? ' y enviadas a Sheets ✓' : ' localmente'), 'ok');
+}
+
+// TABLE
+function renderT(filter) {
+  const field = document.getElementById('sf')?.value || 'all';
+  const tbody = document.getElementById('rtbody');
+  let list = records;
+  if (filter) {
+    const q = filter.toLowerCase();
+    list = records.filter(r => {
+      if (field === 'consultora') return r.consultora?.includes(filter);
+      if (field === 'pedido') return r.pedido?.includes(filter);
+      if (field === 'campana') return r.campana?.includes(filter);
+      if (field === 'zona') return r.zona?.toLowerCase().includes(q);
+      return Object.values(r).some(v => String(v).toLowerCase().includes(q));
+    });
+  }
+  updRcnt(list.length);
+  if (!list.length) {
+    tbody.innerHTML = `<tr><td colspan="6"><div class="empty"><div class="big">${filter ? '🔍' : '📋'}</div><div>${filter ? 'Sin resultados para "' + filter + '"' : 'No hay registros aún'}</div></div></td></tr>`;
+    return;
+  }
+  tbody.innerHTML = list.map((r) => `
+    <tr onclick="showD(${records.indexOf(r)})">
+      <td class="cm">${r.campana||'—'}</td>
+      <td class="ca">${r.consultora||'—'}</td>
+      <td>${r.pedido||'—'}</td>
+      <td class="cm">${r.zona||'—'}</td>
+      <td class="cm">${r.fecha||'—'}</td>
+      <td class="cl">${r.imageData ? '<a href="' + r.imageData + '" target="_blank" onclick="event.stopPropagation()">Ver foto</a>' : '—'}</td>
+    </tr>`).join('');
+}
+function filterR() { renderT(document.getElementById('sq').value.trim()); }
+function updRcnt(n) { const c = n !== undefined ? n : records.length; document.getElementById('rcnt').textContent = c + ' boleta' + (c !== 1 ? 's' : ''); }
+
+// MODAL
+function showD(idx) {
+  const r = records[idx];
+  document.getElementById('mimg').src = r.imageData || ''; document.getElementById('mimg').style.display = r.imageData ? 'block' : 'none';
+  document.getElementById('mfields').innerHTML = `
+    <div class="mdi"><div class="lb">Campaña</div><div class="vl">${r.campana||'—'}</div></div>
+    <div class="mdi"><div class="lb">ID Consultora</div><div class="vl">${r.consultora||'—'}</div></div>
+    <div class="mdi"><div class="lb">Nº Pedido</div><div class="vl">${r.pedido||'—'}</div></div>
+    <div class="mdi"><div class="lb">Zona</div><div class="vl" style="color:var(--text)">${r.zona||'—'}</div></div>
+    <div class="mdi" style="grid-column:1/-1"><div class="lb">Archivo</div><div class="vl" style="color:var(--muted);font-size:11px">${r.fileName||'—'}</div></div>
+    <div class="mdi" style="grid-column:1/-1"><div class="lb">Fecha</div><div class="vl" style="color:var(--text);font-size:12px">${r.fecha||'—'}</div></div>`;
+  document.getElementById('mo').classList.add('open');
+}
+function closeMo() { document.getElementById('mo').classList.remove('open'); }
+
+// CONFIG
+function saveCfg() {
+  cfg.su = document.getElementById('cfg-su').value.trim();
+  cfg.du = document.getElementById('cfg-du').value.trim();
+  localStorage.setItem('b_cfg', JSON.stringify(cfg));
+}
+function copyScript() { navigator.clipboard.writeText(document.getElementById('scode').textContent).then(() => notify('Código copiado ✓', 'ok')); }
+
+// NOTIFY
+function notify(msg, type) {
+  const el = document.getElementById('notif');
+  el.textContent = msg; el.className = 'show ' + (type||'ok');
+  setTimeout(() => el.classList.remove('show'), 3800);
+}
+</script>
+</body>
+</html>
