@@ -534,7 +534,7 @@ async function getOCRWorker(mode) {
     tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÑñáéíóúÁÉÍÓÚ:.- /',
     tessedit_pageseg_mode: '3',
     preserve_interword_spaces: '1',
-    tessedit_ocr_engine_mode: '1',  // LSTM only — more accurate
+
   });
   return ocrWorker;
 }
@@ -558,7 +558,7 @@ function buildCanvas(img, opts = {}) {
 
   const c = document.createElement('canvas');
   c.width = outW; c.height = outH;
-  const ctx = c.getContext('2d');
+  const ctx = c.getContext('2d', { willReadFrequently: true });
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, outW, outH);
 
