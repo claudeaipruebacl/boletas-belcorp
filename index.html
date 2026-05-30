@@ -449,7 +449,7 @@ function renderQI(item){
     </div>
     <div class="ist">
       <span class="pill pending" id="sp_${item.id}">PENDIENTE</span>
-      <button class="btn-rescan" id="rb_${item.id}" onclick="rescanItem('${item.id}')" title="Re-escanear" style="display:none;background:none;border:1px solid var(--accent2);color:var(--accent2);font-family:var(--fm);font-size:10px;padding:3px 8px;border-radius:3px;cursor:pointer;margin-top:2px;white-space:nowrap">↻ Re-escanear</button>
+      <button id="rb_${item.id}" onclick="rescanItem('${item.id}')" style="display:none;background:var(--accent2);color:#fff;border:none;font-family:var(--fm);font-size:10px;padding:4px 10px;border-radius:3px;cursor:pointer;margin-top:4px;white-space:nowrap;letter-spacing:.3px">↻ Re-escanear</button>
       <button class="brm" onclick="rmItem('${item.id}')" title="Quitar">✕</button>
     </div>`;
   list.appendChild(d);
@@ -469,7 +469,9 @@ function updQI(item){
   }
   // Show rescan button if warning or error
   const rb=document.getElementById('rb_'+item.id);
-  if(rb) rb.style.display=['warning','error'].includes(item.status)?'block':'none';
+  if(rb) {
+    rb.style.display = ['warning','error'].includes(item.status) ? 'inline-block' : 'none';
+  }
 }
 
 function uf(id,field,val){const item=Q.find(q=>q.id===id);if(item){item[field]=val;updSum();checkAllDone();}}
@@ -528,12 +530,32 @@ async function rescanItem(id){
 
 async function ocrExtract(item) {
   try {
-    // Preprocess image for better OCR
-    const canvas = await preprocessForOCR(item.dataUrl);
     const worker = await getOCRWorker();
-    const { data: { text } } = await worker.recognize(canvas);
 
-    parseOCRText(item, text);
+    // Step 1: OCR full image for consultora, campana, zona
+    const fullCanvas = await preprocessForOCR(item.dataUrl, 1.0, 1.0);
+    const { data: { text: fullText } } = await worker.recognize(fullCanvas);
+    parseOCRText(item, fullText);
+
+    // Step 2: OCR top-right region specifically for pedido (BF- code)
+    if (!item.pedido) {
+      const trCanvas = await preprocessForOCR(item.dataUrl, 0.45, 0.28, 0.55, 0.0);
+      const { data: { text: trText } } = await worker.recognize(trCanvas);
+      // Extract all 10-digit numbers starting with 26
+      const nums = trText.match(/[0-9]{8,12}/g) || [];
+      for (const n of nums) {
+        const d = n.replace(/[^0-9]/g, '');
+        if (d.length === 10 && d.startsWith('26')) { item.pedido = d; break; }
+      }
+      // Also try stripping BF- prefix from text
+      if (!item.pedido) {
+        const bfm = trText.match(/[A-Z]{1,2}[\s\-]*([0-9]{8,12})/i);
+        if (bfm) {
+          const d = bfm[1].replace(/[^0-9]/g,'');
+          if (d.length >= 8) item.pedido = d;
+        }
+      }
+    }
 
     const hasRequired = item.consultora && item.pedido;
     item.status = hasRequired ? (item.campana && item.zona ? 'done' : 'warning') : 'warning';
@@ -544,18 +566,22 @@ async function ocrExtract(item) {
   updQI(item);
 }
 
-async function preprocessForOCR(dataUrl) {
+async function preprocessForOCR(dataUrl, rw=1.0, rh=1.0, rx=0.0, ry=0.0) {
   return new Promise(resolve => {
     const img = new Image();
     img.onload = () => {
-      const scale = Math.min(3, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+      const sw = img.naturalWidth, sh = img.naturalHeight;
+      const srcX = Math.floor(sw * rx);
+      const srcY = Math.floor(sh * ry);
+      const srcW = Math.floor(sw * rw);
+      const srcH = Math.floor(sh * rh);
+      const scale = Math.min(3, 2000 / Math.max(srcW, srcH));
       const canvas = document.createElement('canvas');
-      canvas.width = img.naturalWidth * scale;
-      canvas.height = img.naturalHeight * scale;
+      canvas.width = Math.floor(srcW * scale);
+      canvas.height = Math.floor(srcH * scale);
       const ctx = canvas.getContext('2d');
-      // Enhance contrast for OCR
-      ctx.filter = 'contrast(1.4) brightness(1.1) grayscale(1)';
-      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      ctx.filter = 'contrast(1.6) brightness(1.1) grayscale(1)';
+      ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, canvas.width, canvas.height);
       resolve(canvas);
     };
     img.src = dataUrl;
