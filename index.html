@@ -551,17 +551,24 @@ function parseOCRText(item, text) {
   const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
   const fullText = lines.join(" ");
 
-  // 1. Nº PEDIDO — siempre es BF-/AF-/CF- + digitos, esquina superior derecha
+  // 1. Nº PEDIDO — siempre BF-/AF-/CF- + digitos esquina superior derecha
+  // El numero siempre empieza por 26 y tiene 10 digitos
+  // NUNCA tomar numeros de telefono (empiezan por 3) ni factura (empieza por 20)
   const pedidoPatterns = [
-    /BF[\s\-]*([0-9]{8,12})/i,
-    /AF[\s\-]*([0-9]{8,12})/i,
-    /CF[\s\-]*([0-9]{8,12})/i,
-    /DF[\s\-]*([0-9]{8,12})/i,
-    /[A-Z]{2}[\s\-]([0-9]{8,12})/i,
+    /BF[\s\-]*([0-9]{10})/i,
+    /AF[\s\-]*([0-9]{10})/i,
+    /CF[\s\-]*([0-9]{10})/i,
+    /DF[\s\-]*([0-9]{10})/i,
+    /[A-Z]{2}[\s\-]*(26[0-9]{8})/i,
   ];
   for (const pat of pedidoPatterns) {
     const m = fullText.match(pat);
     if (m) { item.pedido = m[1].replace(/[^0-9]/g, ""); break; }
+  }
+  // Fallback directo: buscar numero de 10 digitos que empiece por 26
+  if (!item.pedido) {
+    const m = fullText.match(/(26[0-9]{8})/);
+    if (m) item.pedido = m[1];
   }
 
   // 2. ID CONSULTORA — empieza por 99, exactamente 10 digitos
@@ -599,8 +606,9 @@ function parseOCRText(item, text) {
     const line = lines[i];
 
     if (!item.pedido) {
-      const m = line.match(/[A-Z]{1,2}[\s\-]([0-9]{8,12})/i);
-      if (m) item.pedido = m[1].replace(/[^0-9]/g, "");
+      // Solo tomar si el numero empieza por 26 (pedido) no por 3 (telefono) ni 20 (factura)
+      const m = line.match(/[A-Z]{1,2}[\s\-]*(26[0-9]{8})/i);
+      if (m) item.pedido = m[1];
     }
     if (!item.consultora) {
       const m = line.match(/(99[0-9]{8})/);
