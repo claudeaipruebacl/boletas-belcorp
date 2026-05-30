@@ -443,12 +443,13 @@ function renderQI(item){
       <div class="ifields">
         <div class="ifield"><label>Campaña</label><input id="ic_${item.id}" type="text" placeholder="Ingresar" oninput="uf('${item.id}','campana',this.value)"></div>
         <div class="ifield"><label>ID Consultora</label><input id="ii_${item.id}" type="text" placeholder="Auto (99...)" oninput="uf('${item.id}','consultora',this.value)"></div>
-        <div class="ifield"><label>Nº Pedido</label><input id="ip_${item.id}" type="text" placeholder="Auto (BF-...)" oninput="uf('${item.id}','pedido',this.value)"></div>
+        <div class="ifield"><label>Nº Pedido</label><input id="ip_${item.id}" type="text" placeholder="Auto (26...)" oninput="uf('${item.id}','pedido',this.value)"></div>
         <div class="ifield"><label>Zona Territorial</label><input id="iz_${item.id}" type="text" placeholder="Ingresar" oninput="uf('${item.id}','zona',this.value)"></div>
       </div>
     </div>
     <div class="ist">
       <span class="pill pending" id="sp_${item.id}">PENDIENTE</span>
+      <button class="btn-rescan" id="rb_${item.id}" onclick="rescanItem('${item.id}')" title="Re-escanear" style="display:none;background:none;border:1px solid var(--accent2);color:var(--accent2);font-family:var(--fm);font-size:10px;padding:3px 8px;border-radius:3px;cursor:pointer;margin-top:2px;white-space:nowrap">↻ Re-escanear</button>
       <button class="brm" onclick="rmItem('${item.id}')" title="Quitar">✕</button>
     </div>`;
   list.appendChild(d);
@@ -466,6 +467,9 @@ function updQI(item){
     inp.value=item[f]||'';
     inp.className=item[f]?'hit':(['done','warning','saved'].includes(item.status)?'miss':'');
   }
+  // Show rescan button if warning or error
+  const rb=document.getElementById('rb_'+item.id);
+  if(rb) rb.style.display=['warning','error'].includes(item.status)?'block':'none';
 }
 
 function uf(id,field,val){const item=Q.find(q=>q.id===id);if(item){item[field]=val;updSum();checkAllDone();}}
@@ -511,6 +515,17 @@ function checkAllDone(){
   }
 }
 
+async function rescanItem(id){
+  const item=Q.find(q=>q.id===id);
+  if(!item)return;
+  // Reset fields and rescan
+  item.campana='';item.consultora='';item.pedido='';item.zona='';
+  item.status='scanning';
+  updQI(item);
+  await ocrExtract(item);
+  checkAllDone();
+}
+
 async function ocrExtract(item) {
   try {
     // Preprocess image for better OCR
@@ -551,24 +566,15 @@ function parseOCRText(item, text) {
   const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
   const fullText = lines.join(" ");
 
-  // 1. Nº PEDIDO — siempre BF-/AF-/CF- + digitos esquina superior derecha
-  // El numero siempre empieza por 26 y tiene 10 digitos
-  // NUNCA tomar numeros de telefono (empiezan por 3) ni factura (empieza por 20)
-  const pedidoPatterns = [
-    /BF[\s\-]*([0-9]{10})/i,
-    /AF[\s\-]*([0-9]{10})/i,
-    /CF[\s\-]*([0-9]{10})/i,
-    /DF[\s\-]*([0-9]{10})/i,
-    /[A-Z]{2}[\s\-]*(26[0-9]{8})/i,
-  ];
-  for (const pat of pedidoPatterns) {
-    const m = fullText.match(pat);
-    if (m) { item.pedido = m[1].replace(/[^0-9]/g, ""); break; }
-  }
-  // Fallback directo: buscar numero de 10 digitos que empiece por 26
-  if (!item.pedido) {
-    const m = fullText.match(/(26[0-9]{8})/);
-    if (m) item.pedido = m[1];
+  // 1. Nº PEDIDO — empieza SIEMPRE por 26 y tiene exactamente 10 digitos
+  // Nunca es el telefono (empieza por 3) ni la factura (empieza por 20, 8 digitos)
+  // Buscar directamente el patron 26XXXXXXXX en todo el texto
+  const allNumbers = fullText.match(/[0-9]{8,12}/g) || [];
+  for (const num of allNumbers) {
+    const d = num.replace(/[^0-9]/g, '');
+    if (d.length === 10 && d.startsWith('26')) {
+      item.pedido = d; break;
+    }
   }
 
   // 2. ID CONSULTORA — empieza por 99, exactamente 10 digitos
@@ -606,9 +612,10 @@ function parseOCRText(item, text) {
     const line = lines[i];
 
     if (!item.pedido) {
-      // Solo tomar si el numero empieza por 26 (pedido) no por 3 (telefono) ni 20 (factura)
-      const m = line.match(/[A-Z]{1,2}[\s\-]*(26[0-9]{8})/i);
-      if (m) item.pedido = m[1];
+      const nums = line.match(/[0-9]{10}/g) || [];
+      for (const n of nums) {
+        if (n.startsWith('26')) { item.pedido = n; break; }
+      }
     }
     if (!item.consultora) {
       const m = line.match(/(99[0-9]{8})/);
