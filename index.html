@@ -548,52 +548,73 @@ async function preprocessForOCR(dataUrl) {
 }
 
 function parseOCRText(item, text) {
-  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-  const fullText = lines.join(' ');
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+  const fullText = lines.join(" ");
 
-  // 1. CAMPAÑA — look for "CAMPAÑA" label followed by 6-digit number
-  const campanaMatch = fullText.match(/CAMPA[NÑ]A[:\s]+([0-9]{6})/i) ||
-                       fullText.match(/(?:^|\s)(20[0-9]{4})(?:\s|$)/m);
-  if (campanaMatch && !item.campana) {
-    item.campana = campanaMatch[1];
+  // 1. Nº PEDIDO — siempre es BF-/AF-/CF- + digitos, esquina superior derecha
+  const pedidoPatterns = [
+    /BF[\s\-]*([0-9]{8,12})/i,
+    /AF[\s\-]*([0-9]{8,12})/i,
+    /CF[\s\-]*([0-9]{8,12})/i,
+    /DF[\s\-]*([0-9]{8,12})/i,
+    /[A-Z]{2}[\s\-]([0-9]{8,12})/i,
+  ];
+  for (const pat of pedidoPatterns) {
+    const m = fullText.match(pat);
+    if (m) { item.pedido = m[1].replace(/[^0-9]/g, ""); break; }
   }
 
-  // 2. ID CONSULTORA — COD: field starts with 99, 10 digits
-  const codMatch = fullText.match(/COD[:\s.]+([9][9][0-9]{8})/i) ||
-                   fullText.match(/\b(99[0-9]{8})\b/);
-  if (codMatch && !item.consultora) {
-    item.consultora = codMatch[1].replace(/[^0-9]/g,'');
+  // 2. ID CONSULTORA — empieza por 99, exactamente 10 digitos
+  const consultoraPatterns = [
+    /COD[\s:.]+([9][9][0-9]{8})/i,
+    /(99[0-9]{8})/,
+  ];
+  for (const pat of consultoraPatterns) {
+    const m = fullText.match(pat);
+    if (m) { item.consultora = m[1].replace(/[^0-9]/g, ""); break; }
   }
 
-  // 3. Nº PEDIDO — BF- number in top right, strip letters
-  const bfMatch = fullText.match(/BF[-\s]*([0-9]{8,12})/i) ||
-                  fullText.match(/([A-Z]{2}[-\s]+([0-9]{8,12}))/i);
-  if (bfMatch && !item.pedido) {
-    item.pedido = (bfMatch[2] || bfMatch[1]).replace(/[^0-9]/g,'');
+  // 3. CAMPAÑA — 6 digitos empezando por 20
+  const campanaPatterns = [
+    /CAMPA.A[\s:]+([0-9]{6})/i,
+    /CAMPA.A\s*([0-9]{6})/i,
+  ];
+  for (const pat of campanaPatterns) {
+    const m = fullText.match(pat);
+    if (m && m[1].length === 6) { item.campana = m[1]; break; }
   }
 
-  // 4. ZONA — COD. TERRITORIAL field
-  const zonaMatch = fullText.match(/TERRITORIAL[:\s]+([A-Z0-9]+[\s]*[0-9]+)/i) ||
-                    fullText.match(/COD\.[\s]*TERRITORIAL[:\s]+([A-Z0-9]+\s[0-9]+)/i);
-  if (zonaMatch && !item.zona) {
-    item.zona = zonaMatch[1].trim();
+  // 4. ZONA TERRITORIAL
+  const zonaPatterns = [
+    /TERRITORIAL[\s:]+([A-Z0-9]{5,8}\s[0-9]{4,6})/i,
+    /TERRITORIAL[\s:]+([A-Z0-9]+\s[0-9]+)/i,
+  ];
+  for (const pat of zonaPatterns) {
+    const m = fullText.match(pat);
+    if (m) { item.zona = m[1].trim(); break; }
   }
 
-  // Fallback: scan line by line
-  for (const line of lines) {
-    const clean = line.replace(/[^0-9A-Z ]/gi, ' ').trim();
+  // Fallback linea por linea
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
 
-    if (!item.campana) {
-      const m = line.match(/^(20[0-9]{4})$/);
-      if (m) item.campana = m[1];
+    if (!item.pedido) {
+      const m = line.match(/[A-Z]{1,2}[\s\-]([0-9]{8,12})/i);
+      if (m) item.pedido = m[1].replace(/[^0-9]/g, "");
     }
     if (!item.consultora) {
-      const m = clean.match(/\b(99[0-9]{8})\b/);
+      const m = line.match(/(99[0-9]{8})/);
       if (m) item.consultora = m[1];
     }
-    if (!item.pedido) {
-      const m = line.match(/BF[-\s]?([0-9]{8,12})/i);
-      if (m) item.pedido = m[1].replace(/[^0-9]/g,'');
+    if (!item.campana) {
+      if (/CAMPA/i.test(line) && lines[i+1]) {
+        const m = lines[i+1].match(/^([0-9]{6})$/);
+        if (m) item.campana = m[1];
+      }
+    }
+    if (!item.zona) {
+      const m = line.match(/TERRITORIAL[\s:]+([A-Z0-9]+\s[0-9]+)/i);
+      if (m) item.zona = m[1].trim();
     }
   }
 }
