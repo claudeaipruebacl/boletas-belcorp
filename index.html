@@ -374,7 +374,7 @@ tbody td{padding:10px 14px;font-family:var(--fm);vertical-align:middle;font-size
 
 <div id="notif"></div>
 
-<script src="https://unpkg.com/@zxing/library@0.19.1/umd/index.min.js"></script>
+<script src="https://unpkg.com/tesseract.js@5.0.4/dist/tesseract.min.js"></script>
 <script>
 // STATE
 let Q = [];
@@ -395,9 +395,7 @@ function startClock() {
   update(); setInterval(update, 60000);
 }
 
-function waitZXing() {
-  return new Promise(r => { const c = () => { if(window.ZXing) r(); else setTimeout(c,100); }; c(); });
-}
+
 
 // PANELS
 const tbTitles = { upload: ['◈ Subir boletas','Procesamiento automático'], records: ['▦ Registros','Histórico de boletas procesadas'], config: ['⊙ Configuración','Integración Sheets y Drive'] };
@@ -475,76 +473,129 @@ function rmItem(id){Q=Q.filter(q=>q.id!==id);const el=document.getElementById('q
 function clearQ(){Q=[];document.getElementById('qlist').innerHTML='';document.getElementById('qwrap').style.display='none';document.getElementById('stats-row').style.display='none';dz.style.display='block';document.getElementById('prog').style.display='none';document.getElementById('bsa').disabled=true;document.getElementById('sstatus').textContent='';}
 
 // PROCESS
+let ocrWorker = null;
+
+async function getOCRWorker() {
+  if (ocrWorker) return ocrWorker;
+  ocrWorker = await Tesseract.createWorker('spa', 1, {
+    logger: () => {}
+  });
+  await ocrWorker.setParameters({
+    tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz:.-/ ',
+  });
+  return ocrWorker;
+}
+
 async function processQ(){
   if(busy)return;busy=true;
-  await waitZXing();
   const pending=Q.filter(q=>q.status==='pending');
   const tot=pending.length;let done=0;
   if(tot>0){document.getElementById('prog').style.display='block';document.getElementById('pf').style.width='0%';}
-  for(const item of pending){item.status='scanning';updQI(item);await scanBarcodes(item);done++;document.getElementById('pf').style.width=(done/tot*100)+'%';updSum();}
+  // Init OCR worker once
+  document.getElementById('sstatus').textContent='Iniciando lector OCR...';
+  await getOCRWorker();
+  document.getElementById('sstatus').textContent='';
+  for(const item of pending){
+    item.status='scanning';updQI(item);
+    await ocrExtract(item);
+    done++;
+    document.getElementById('pf').style.width=(done/tot*100)+'%';
+    updSum();
+  }
   busy=false;checkAllDone();
 }
 
-function checkAllDone(){if(Q.length&&Q.every(q=>['done','warning','error','saved'].includes(q.status))){document.getElementById('bsa').disabled=false;}}
+function checkAllDone(){
+  if(Q.length&&Q.every(q=>['done','warning','error','saved'].includes(q.status))){
+    document.getElementById('bsa').disabled=false;
+  }
+}
 
-// BARCODE SCAN
-async function scanBarcodes(item){
-  try{
-    const img=new Image();img.src=item.dataUrl;
-    await new Promise(r=>{img.onload=r;});
-    const allCodes=[];
-    const approaches=[
-      {scale:1.0,contrast:1,brightness:0},
-      {scale:1.5,contrast:1.5,brightness:10},
-      {scale:2.0,contrast:2,brightness:20},
-      {scale:1.0,contrast:1,brightness:0,gray:true},
-      {scale:1.5,contrast:2.5,brightness:0,gray:true},
-      {scale:2.0,contrast:1.8,brightness:15,gray:true},
-    ];
-    const regions=[
-      {x:0.55,y:0.0,w:0.45,h:0.30},
-      {x:0.30,y:0.25,w:0.50,h:0.35},
-      {x:0.0,y:0.0,w:1.0,h:0.5},
-      {x:0.0,y:0.0,w:1.0,h:1.0},
-    ];
-    const hints=new Map();
-    hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS,[ZXing.BarcodeFormat.CODE_128,ZXing.BarcodeFormat.CODE_39,ZXing.BarcodeFormat.EAN_13,ZXing.BarcodeFormat.ITF]);
-    hints.set(ZXing.DecodeHintType.TRY_HARDER,true);
-    const reader=new ZXing.MultiFormatReader();reader.setHints(hints);
-    for(const ap of approaches){
-      for(const reg of regions){
-        try{
-          const c=makeCanvas(img,ap,reg);
-          const lum=new ZXing.HTMLCanvasElementLuminanceSource(c);
-          const bmp=new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
-          const res=reader.decode(bmp);
-          const digits=res.getText().replace(/[^0-9]/g,'');
-          if(digits.length>=6&&!allCodes.find(c=>c.digits===digits)){allCodes.push({digits,topRight:reg.x>0.4&&reg.y<0.15});}
-        }catch(e){}
-      }
-      if(allCodes.length>=2)break;
-    }
-    classify(item,allCodes);
-    item.status=(item.consultora&&item.pedido)?'done':'warning';
-  }catch(e){item.status='warning';}
+async function ocrExtract(item) {
+  try {
+    // Preprocess image for better OCR
+    const canvas = await preprocessForOCR(item.dataUrl);
+    const worker = await getOCRWorker();
+    const { data: { text } } = await worker.recognize(canvas);
+
+    parseOCRText(item, text);
+
+    const hasRequired = item.consultora && item.pedido;
+    item.status = hasRequired ? (item.campana && item.zona ? 'done' : 'warning') : 'warning';
+  } catch(err) {
+    console.warn('OCR error:', err);
+    item.status = 'warning';
+  }
   updQI(item);
 }
 
-function makeCanvas(img,ap,reg){
-  const sw=img.naturalWidth,sh=img.naturalHeight;
-  const rx=Math.floor(sw*reg.x),ry=Math.floor(sh*reg.y),rw=Math.floor(sw*reg.w),rh=Math.floor(sh*reg.h);
-  const c=document.createElement('canvas');c.width=Math.floor(rw*ap.scale);c.height=Math.floor(rh*ap.scale);
-  const ctx=c.getContext('2d');
-  let f='';if(ap.gray)f+='grayscale(1) ';if(ap.contrast!==1)f+=`contrast(${ap.contrast}) `;if(ap.brightness!==0)f+=`brightness(${1+ap.brightness/100}) `;
-  ctx.filter=f.trim()||'none';ctx.drawImage(img,rx,ry,rw,rh,0,0,c.width,c.height);return c;
+async function preprocessForOCR(dataUrl) {
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => {
+      const scale = Math.min(3, 2000 / Math.max(img.naturalWidth, img.naturalHeight));
+      const canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth * scale;
+      canvas.height = img.naturalHeight * scale;
+      const ctx = canvas.getContext('2d');
+      // Enhance contrast for OCR
+      ctx.filter = 'contrast(1.4) brightness(1.1) grayscale(1)';
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas);
+    };
+    img.src = dataUrl;
+  });
 }
 
-function classify(item,codes){
-  for(const c of codes){if(!item.consultora&&c.digits.startsWith('99')&&c.digits.length>=8)item.consultora=c.digits;}
-  const tr=codes.find(c=>c.topRight&&c.digits!==item.consultora);
-  if(tr&&!item.pedido)item.pedido=tr.digits;
-  if(!item.pedido){const o=codes.find(c=>c.digits!==item.consultora&&c.digits.length>=6);if(o)item.pedido=o.digits;}
-  if(!item.consultora&&!item.pedido&&codes.length===1){if(codes[0].digits.startsWith('99'))item.consultora=codes[0].digits;else item.pedido=codes[0].digits;}
+function parseOCRText(item, text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  const fullText = lines.join(' ');
+
+  // 1. CAMPAÑA — look for "CAMPAÑA" label followed by 6-digit number
+  const campanaMatch = fullText.match(/CAMPA[NÑ]A[:\s]+([0-9]{6})/i) ||
+                       fullText.match(/(?:^|\s)(20[0-9]{4})(?:\s|$)/m);
+  if (campanaMatch && !item.campana) {
+    item.campana = campanaMatch[1];
+  }
+
+  // 2. ID CONSULTORA — COD: field starts with 99, 10 digits
+  const codMatch = fullText.match(/COD[:\s.]+([9][9][0-9]{8})/i) ||
+                   fullText.match(/\b(99[0-9]{8})\b/);
+  if (codMatch && !item.consultora) {
+    item.consultora = codMatch[1].replace(/[^0-9]/g,'');
+  }
+
+  // 3. Nº PEDIDO — BF- number in top right, strip letters
+  const bfMatch = fullText.match(/BF[-\s]*([0-9]{8,12})/i) ||
+                  fullText.match(/([A-Z]{2}[-\s]+([0-9]{8,12}))/i);
+  if (bfMatch && !item.pedido) {
+    item.pedido = (bfMatch[2] || bfMatch[1]).replace(/[^0-9]/g,'');
+  }
+
+  // 4. ZONA — COD. TERRITORIAL field
+  const zonaMatch = fullText.match(/TERRITORIAL[:\s]+([A-Z0-9]+[\s]*[0-9]+)/i) ||
+                    fullText.match(/COD\.[\s]*TERRITORIAL[:\s]+([A-Z0-9]+\s[0-9]+)/i);
+  if (zonaMatch && !item.zona) {
+    item.zona = zonaMatch[1].trim();
+  }
+
+  // Fallback: scan line by line
+  for (const line of lines) {
+    const clean = line.replace(/[^0-9A-Z ]/gi, ' ').trim();
+
+    if (!item.campana) {
+      const m = line.match(/^(20[0-9]{4})$/);
+      if (m) item.campana = m[1];
+    }
+    if (!item.consultora) {
+      const m = clean.match(/\b(99[0-9]{8})\b/);
+      if (m) item.consultora = m[1];
+    }
+    if (!item.pedido) {
+      const m = line.match(/BF[-\s]?([0-9]{8,12})/i);
+      if (m) item.pedido = m[1].replace(/[^0-9]/g,'');
+    }
+  }
 }
 
 // SUMMARY
