@@ -474,6 +474,45 @@ function updQI(item){
   }
 }
 
+// Process queue — scans all pending items sequentially
+async function processQ() {
+  if (busy) return;
+  busy = true;
+  const pending = Q.filter(q => q.status === 'pending');
+  const prog = document.getElementById('prog');
+  const pf = document.getElementById('pf');
+  prog.style.display = 'block';
+  let done = 0;
+  for (const item of pending) {
+    item.status = 'scanning';
+    updQI(item);
+    await ocrExtract(item);
+    done++;
+    pf.style.width = Math.round((done / pending.length) * 100) + '%';
+  }
+  prog.style.display = 'none';
+  pf.style.width = '0%';
+  busy = false;
+  checkAllDone();
+}
+
+// Re-scan a single item
+async function rescanItem(id) {
+  const item = Q.find(q => q.id === id);
+  if (!item) return;
+  item.status = 'scanning';
+  item.campana = ''; item.consultora = ''; item.pedido = ''; item.zona = '';
+  updQI(item);
+  await ocrExtract(item);
+  checkAllDone();
+}
+
+// Enable save button when at least one item is done/warning
+function checkAllDone() {
+  const ready = Q.some(q => ['done','warning'].includes(q.status));
+  document.getElementById('bsa').disabled = !ready;
+}
+
 function uf(id,field,val){const item=Q.find(q=>q.id===id);if(item){item[field]=val;updSum();checkAllDone();}}
 function rmItem(id){Q=Q.filter(q=>q.id!==id);const el=document.getElementById('qi_'+id);if(el)el.remove();updSum();if(!Q.length){document.getElementById('qwrap').style.display='none';document.getElementById('stats-row').style.display='none';dz.style.display='block';}}
 function clearQ(){Q=[];document.getElementById('qlist').innerHTML='';document.getElementById('qwrap').style.display='none';document.getElementById('stats-row').style.display='none';dz.style.display='block';document.getElementById('prog').style.display='none';document.getElementById('bsa').disabled=true;document.getElementById('sstatus').textContent='';}
