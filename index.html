@@ -339,21 +339,60 @@ tbody td{padding:10px 14px;font-family:var(--fm);vertical-align:middle;font-size
         <input type="text" id="cfg-su" placeholder="https://script.google.com/macros/s/XXXXXX/exec" oninput="saveCfg()">
       </div>
       <div class="cfg-card">
-        <h4>URL carpeta Google Drive</h4>
-        <p>Carpeta compartida donde se almacenan las fotos originales de las boletas.</p>
-        <input type="text" id="cfg-du" placeholder="https://drive.google.com/drive/folders/XXXXXX" oninput="saveCfg()">
+        <h4>ID carpeta Google Drive (para fotos)</h4>
+        <p>ID de la carpeta de Google Drive donde se guardarán las fotos. Lo encuentras en la URL de tu carpeta: <code style="background:var(--bg);padding:2px 5px;border-radius:2px;font-size:10px">drive.google.com/drive/folders/<strong>ESTE_ES_EL_ID</strong></code>. Si lo dejas vacío, las fotos se subirán a la raíz de Drive.</p>
+        <input type="text" id="cfg-du" placeholder="1A2B3C4D5E6F... (ID de carpeta Drive)" oninput="saveCfg()">
       </div>
       <div class="cfg-card">
         <h4>Código Apps Script</h4>
         <p>Pega en <strong>script.google.com</strong> → nuevo proyecto → desplegar como Web App (acceso: cualquier usuario).</p>
-        <div class="code-block" id="scode">function doPost(e) {
-  var data = JSON.parse(e.postData.contents);
-  var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
-  if (sheet.getLastRow() === 0) {
-    sheet.appendRow(['Campaña','ID Consultora','Nº Pedido','Zona','Fecha','URL Foto']);
+        <div class="code-block" id="scode">// ── Belcorp Boletas — Apps Script ──────────────────────────
+// Desplegar como Web App:
+//   Ejecutar como: Yo (tu cuenta)
+//   Acceso: Cualquier usuario (o anónimo)
+
+var FOLDER_ID = ''; // ← ID carpeta Drive (opcional)
+
+function doPost(e) {
+  try {
+    var data = JSON.parse(e.postData.contents);
+
+    // 1. SUBIR FOTO A DRIVE
+    var urlFoto = '';
+    if (data.imageBase64 && data.fileName) {
+      var folderId = data.folderId || FOLDER_ID;
+      var folder = folderId
+        ? DriveApp.getFolderById(folderId)
+        : DriveApp.getRootFolder();
+      var blob = Utilities.newBlob(
+        Utilities.base64Decode(data.imageBase64),
+        data.mimeType || 'image/jpeg',
+        data.fileName
+      );
+      var file = folder.createFile(blob);
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      urlFoto = 'https://drive.google.com/file/d/' + file.getId() + '/view';
+    }
+
+    // 2. REGISTRAR EN SHEETS
+    var sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+    if (sheet.getLastRow() === 0) {
+      sheet.appendRow(['Campaña','ID Consultora','Nº Pedido','Zona','Fecha','URL Foto']);
+    }
+    sheet.appendRow([
+      data.campana, data.consultora, data.pedido,
+      data.zona, data.fecha, urlFoto
+    ]);
+
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: true, urlFoto: urlFoto }))
+      .setMimeType(ContentService.MimeType.JSON);
+
+  } catch(err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: err.message }))
+      .setMimeType(ContentService.MimeType.JSON);
   }
-  sheet.appendRow([data.campana, data.consultora, data.pedido, data.zona, data.fecha, data.urlFoto]);
-  return ContentService.createTextOutput(JSON.stringify({ok:true})).setMimeType(ContentService.MimeType.JSON);
 }</div>
         <button class="btn-secondary" onclick="copyScript()" style="margin-top:10px;font-size:11px">Copiar código</button>
       </div>
@@ -838,20 +877,43 @@ function updSum(){
 async function saveAll(){
   const toSave=Q.filter(q=>['done','warning'].includes(q.status));
   if(!toSave.length){notify('No hay boletas listas','warn');return;}
+  if(!cfg.su){notify('Configura la URL de Apps Script primero','warn');return;}
   document.getElementById('bsa').disabled=true;
-  document.getElementById('sstatus').textContent='Guardando '+toSave.length+' boletas...';
-  let cnt=0;
+  let cnt=0,errs=0;
   for(const item of toSave){
     const fecha=new Date().toLocaleString('es-CO',{timeZone:'America/Bogota'});
-    const urlFoto=cfg.du||'— (configura Drive URL)';
+    document.getElementById('sstatus').textContent='Subiendo '+(cnt+1)+'/'+toSave.length+': '+item.file.name+'…';
+    // Extract base64 data (remove data:image/xxx;base64, prefix)
+    const b64=item.dataUrl.split(',')[1];
+    const mimeType=item.dataUrl.split(';')[0].split(':')[1];
+    const payload={
+      action:'saveBoletaWithPhoto',
+      campana:item.campana,
+      consultora:item.consultora,
+      pedido:item.pedido,
+      zona:item.zona,
+      fecha,
+      fileName:item.file.name,
+      mimeType,
+      imageBase64:b64,
+      folderId:cfg.du||''
+    };
+    let urlFoto='— (error al subir)';
+    try{
+      const resp=await fetch(cfg.su,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(payload)});
+      const json=await resp.json();
+      if(json.ok && json.urlFoto) urlFoto=json.urlFoto;
+      else if(json.error) console.warn('Apps Script error:',json.error);
+    }catch(e){console.warn('Error al guardar boleta:',e);errs++;}
     records.unshift({campana:item.campana,consultora:item.consultora,pedido:item.pedido,zona:item.zona,fecha,urlFoto,imageData:item.dataUrl,fileName:item.file.name});
-    if(cfg.su){try{await fetch(cfg.su,{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify({campana:item.campana,consultora:item.consultora,pedido:item.pedido,zona:item.zona,fecha,urlFoto})});}catch(e){}}
     item.status='saved';updQI(item);cnt++;
   }
   localStorage.setItem('b_rec',JSON.stringify(records));
   updSidebarStats();updSum();
-  document.getElementById('sstatus').textContent='✓ '+cnt+' boletas guardadas';
-  notify(cnt+' boletas guardadas'+(cfg.su?' — enviadas a Sheets ✓':' localmente'),'ok');
+  const msg=cnt+' boletas guardadas'+(errs?' ('+errs+' con error)':' — foto en Drive y URL en Sheets ✓');
+  document.getElementById('sstatus').textContent='✓ '+msg;
+  notify(msg,errs?'warn':'ok');
+  document.getElementById('bsa').disabled=false;
 }
 
 // TABLE
@@ -863,7 +925,7 @@ function renderT(filter){
   document.getElementById('rcnt').textContent=records.length+' boletas registradas';
   document.getElementById('filter-count').textContent=filter?('mostrando '+list.length):'';
   if(!list.length){tbody.innerHTML=`<tr><td colspan="6"><div class="empty-state"><div class="eicon">${filter?'⌕':'▦'}</div><div>${filter?'Sin resultados para "'+filter+'"':'No hay registros aún'}</div></div></td></tr>`;return;}
-  tbody.innerHTML=list.map(r=>`<tr onclick="showD(${records.indexOf(r)})"><td class="cm">${r.campana||'—'}</td><td class="ca">${r.consultora||'—'}</td><td>${r.pedido||'—'}</td><td class="cm">${r.zona||'—'}</td><td class="cm">${r.fecha||'—'}</td><td class="cl">${r.imageData?'<a href="'+r.imageData+'" target="_blank" onclick="event.stopPropagation()">Ver foto</a>':'—'}</td></tr>`).join('');
+  tbody.innerHTML=list.map(r=>`<tr onclick="showD(${records.indexOf(r)})"><td class="cm">${r.campana||'—'}</td><td class="ca">${r.consultora||'—'}</td><td>${r.pedido||'—'}</td><td class="cm">${r.zona||'—'}</td><td class="cm">${r.fecha||'—'}</td><td class="cl">${r.urlFoto&&r.urlFoto.startsWith('http')?'<a href="'+r.urlFoto+'" target="_blank" onclick="event.stopPropagation()">📎 Drive</a>':(r.imageData?'<a href="'+r.imageData+'" target="_blank" onclick="event.stopPropagation()">Ver foto</a>':'—')}</td></tr>`).join('');
 }
 function filterR(){renderT(document.getElementById('sq').value.trim());}
 function updSidebarStats(){document.getElementById('sb-count').textContent=records.length;}
