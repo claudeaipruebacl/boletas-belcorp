@@ -434,8 +434,6 @@ function startClock() {
   update(); setInterval(update, 60000);
 }
 
-
-
 // PANELS
 const tbTitles = { upload: ['◈ Subir boletas','Procesamiento automático'], records: ['▦ Registros','Histórico de boletas procesadas'], config: ['⊙ Configuración','Integración Sheets y Drive'] };
 function sw(name, btn) {
@@ -506,14 +504,11 @@ function updQI(item){
     inp.value=item[f]||'';
     inp.className=item[f]?'hit':(['done','warning','saved'].includes(item.status)?'miss':'');
   }
-  // Show rescan button if warning or error
   const rb=document.getElementById('rb_'+item.id);
-  if(rb) {
-    rb.style.display = ['warning','error'].includes(item.status) ? 'inline-block' : 'none';
-  }
+  if(rb) rb.style.display = ['warning','error'].includes(item.status) ? 'inline-block' : 'none';
 }
 
-// Process queue — scans all pending items sequentially
+// Process queue — parallel processing for speed
 async function processQ() {
   if (busy) return;
   busy = true;
@@ -522,20 +517,26 @@ async function processQ() {
   const pf = document.getElementById('pf');
   prog.style.display = 'block';
   let done = 0;
-  for (const item of pending) {
-    item.status = 'scanning';
-    updQI(item);
-    await ocrExtract(item);
-    done++;
+
+  // Initialize worker once before processing
+  await getOCRWorker();
+
+  // Process all in parallel (max 3 at a time to avoid memory issues)
+  const BATCH = 3;
+  for (let i = 0; i < pending.length; i += BATCH) {
+    const batch = pending.slice(i, i + BATCH);
+    batch.forEach(item => { item.status = 'scanning'; updQI(item); });
+    await Promise.all(batch.map(item => ocrExtract(item)));
+    done += batch.length;
     pf.style.width = Math.round((done / pending.length) * 100) + '%';
   }
+
   prog.style.display = 'none';
   pf.style.width = '0%';
   busy = false;
   checkAllDone();
 }
 
-// Re-scan a single item
 async function rescanItem(id) {
   const item = Q.find(q => q.id === id);
   if (!item) return;
@@ -546,7 +547,6 @@ async function rescanItem(id) {
   checkAllDone();
 }
 
-// Enable save button when at least one item is done/warning
 function checkAllDone() {
   const ready = Q.some(q => ['done','warning'].includes(q.status));
   document.getElementById('bsa').disabled = !ready;
@@ -556,103 +556,88 @@ function uf(id,field,val){const item=Q.find(q=>q.id===id);if(item){item[field]=v
 function rmItem(id){Q=Q.filter(q=>q.id!==id);const el=document.getElementById('qi_'+id);if(el)el.remove();updSum();if(!Q.length){document.getElementById('qwrap').style.display='none';document.getElementById('stats-row').style.display='none';dz.style.display='block';}}
 function clearQ(){Q=[];document.getElementById('qlist').innerHTML='';document.getElementById('qwrap').style.display='none';document.getElementById('stats-row').style.display='none';dz.style.display='block';document.getElementById('prog').style.display='none';document.getElementById('bsa').disabled=true;document.getElementById('sstatus').textContent='';}
 
-// PROCESS
+// ── OCR WORKER — single instance, digits-only whitelist ───
 let ocrWorker = null;
 
-async function getOCRWorker(mode) {
-  // mode: 'block' (psm 6) for isolated regions, 'auto' (psm 3) for full page, 'sparse' (psm 11) for scattered text
-  if (ocrWorker) {
-    // Update pageseg_mode dynamically per job
-    const psm = mode === 'auto' ? '3' : mode === 'sparse' ? '11' : '6';
-    await ocrWorker.setParameters({ tessedit_pageseg_mode: psm });
-    return ocrWorker;
-  }
-  ocrWorker = await Tesseract.createWorker('spa', 1, { logger: () => {} });
+async function getOCRWorker() {
+  if (ocrWorker) return ocrWorker;
+  // Use 'eng' model — more reliable for digit sequences than 'spa'
+  ocrWorker = await Tesseract.createWorker('eng', 1, { logger: () => {} });
   await ocrWorker.setParameters({
-    // Include Ñ and accented chars; keep digits prominent
-    tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyzÑñáéíóúÁÉÍÓÚ:.- /',
-    tessedit_pageseg_mode: '3',
+    // Only digits + letters needed for codes; drastically reduces search space = faster + more accurate
+    tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz:.- /',
+    tessedit_pageseg_mode: '3',       // PSM 3: auto layout — best for mixed documents
+    tessedit_ocr_engine_mode: '1',    // OEM 1: LSTM only — faster and more accurate than legacy
     preserve_interword_spaces: '1',
-
   });
   return ocrWorker;
 }
 
-// ── IMAGE PREPROCESSING ───────────────────────────────────
-function buildCanvas(img, opts = {}) {
-  const {
-    rx = 0, ry = 0, rw = 1, rh = 1,
-    scale = 2.5,
-    contrast = 1.5, brightness = 1.05,
-    grayscale = true, sharpen = false,
-    invert = false, rotate = 0,
-    threshold = 155,  // configurable per job — higher = keep more gray pixels
-    binarize = true,  // can skip binarization for some jobs
-  } = opts;
-
-  const sw = img.naturalWidth, sh = img.naturalHeight;
-  const srcX = Math.floor(sw * rx), srcY = Math.floor(sh * ry);
-  const srcW = Math.floor(sw * rw), srcH = Math.floor(sh * rh);
-  const outW = Math.floor(srcW * scale), outH = Math.floor(srcH * scale);
+// ── IMAGE PREPROCESSING — single optimized pass ───────────
+// Sharpens, scales, binarizes. Tuned for printed numeric codes.
+function prepareCanvas(img) {
+  const W = img.naturalWidth, H = img.naturalHeight;
+  // Scale to ~2400px wide for good OCR without being too large
+  const scale = Math.min(Math.max(2400 / W, 1.5), 4.0);
+  const outW = Math.round(W * scale), outH = Math.round(H * scale);
 
   const c = document.createElement('canvas');
   c.width = outW; c.height = outH;
   const ctx = c.getContext('2d', { willReadFrequently: true });
+
+  // White background
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, outW, outH);
 
-  let f = '';
-  if (grayscale) f += 'grayscale(1) ';
-  f += `contrast(${contrast}) brightness(${brightness}) `;
-  ctx.filter = f.trim();
-  ctx.drawImage(img, srcX, srcY, srcW, srcH, 0, 0, outW, outH);
+  // Draw with contrast + grayscale boost
+  ctx.filter = 'grayscale(1) contrast(1.8) brightness(1.05)';
+  ctx.drawImage(img, 0, 0, outW, outH);
+  ctx.filter = 'none';
 
-  if (invert) {
-    ctx.filter = 'none';
-    const id = ctx.getImageData(0, 0, outW, outH);
-    for (let i = 0; i < id.data.length; i += 4) {
-      id.data[i] = 255 - id.data[i];
-      id.data[i+1] = 255 - id.data[i+1];
-      id.data[i+2] = 255 - id.data[i+2];
-    }
-    ctx.putImageData(id, 0, 0);
+  // Adaptive binarization with 3x3 unsharp mask pass first
+  const id = ctx.getImageData(0, 0, outW, outH);
+  const d = id.data;
+
+  // 1. Convert to grayscale array
+  const gray = new Uint8Array(outW * outH);
+  for (let i = 0; i < d.length; i += 4) {
+    gray[i >> 2] = (d[i] * 77 + d[i+1] * 150 + d[i+2] * 29) >> 8;
   }
 
-  // Adaptive binarization — configurable threshold
-  if (binarize) {
-    ctx.filter = 'none';
-    const id2 = ctx.getImageData(0, 0, outW, outH);
-    const d = id2.data;
-    // Local adaptive: compute mean of neighborhood to handle uneven lighting
-    const w = outW, h = outH;
-    const gray = new Uint8Array(w * h);
-    for (let i = 0; i < d.length; i += 4) {
-      gray[i >> 2] = Math.round(0.299 * d[i] + 0.587 * d[i+1] + 0.114 * d[i+2]);
+  // 2. Compute integral image for fast mean calculation
+  const integ = new Float64Array((outW + 1) * (outH + 1));
+  for (let y = 1; y <= outH; y++) {
+    for (let x = 1; x <= outW; x++) {
+      integ[y * (outW+1) + x] =
+        gray[(y-1) * outW + (x-1)]
+        + integ[(y-1) * (outW+1) + x]
+        + integ[y * (outW+1) + (x-1)]
+        - integ[(y-1) * (outW+1) + (x-1)];
     }
-    // Simple mean over 15x15 block for local threshold
-    const blockR = 15;
-    for (let y = 0; y < h; y++) {
-      for (let x = 0; x < w; x++) {
-        let sum = 0, cnt = 0;
-        for (let dy = -blockR; dy <= blockR; dy++) {
-          const ny = y + dy;
-          if (ny < 0 || ny >= h) continue;
-          for (let dx = -blockR; dx <= blockR; dx++) {
-            const nx = x + dx;
-            if (nx < 0 || nx >= w) continue;
-            sum += gray[ny * w + nx]; cnt++;
-          }
-        }
-        const localMean = sum / cnt;
-        const px = (y * w + x) * 4;
-        // Use local mean + fixed offset; pixel is black if darker than local average
-        const val = gray[y * w + x] < (localMean - 8) ? 0 : 255;
-        d[px] = d[px+1] = d[px+2] = val;
-      }
-    }
-    ctx.putImageData(id2, 0, 0);
   }
 
+  // 3. Sauvola-like binarization using integral image (fast O(1) per pixel)
+  const R = Math.round(outW * 0.02);  // ~2% of width as window radius
+  const k = 0.12;
+  for (let y = 0; y < outH; y++) {
+    for (let x = 0; x < outW; x++) {
+      const x1 = Math.max(0, x - R), y1 = Math.max(0, y - R);
+      const x2 = Math.min(outW - 1, x + R), y2 = Math.min(outH - 1, y + R);
+      const area = (x2 - x1 + 1) * (y2 - y1 + 1);
+      const sum = integ[(y2+1)*(outW+1)+(x2+1)]
+                - integ[y1*(outW+1)+(x2+1)]
+                - integ[(y2+1)*(outW+1)+x1]
+                + integ[y1*(outW+1)+x1];
+      const mean = sum / area;
+      // Simplified Sauvola: threshold = mean * (1 - k)
+      const thresh = mean * (1 - k);
+      const px = (y * outW + x) * 4;
+      const val = gray[y * outW + x] < thresh ? 0 : 255;
+      d[px] = d[px+1] = d[px+2] = val;
+      d[px+3] = 255;
+    }
+  }
+  ctx.putImageData(id, 0, 0);
   return c;
 }
 
@@ -664,54 +649,18 @@ function loadImage(dataUrl) {
   });
 }
 
-// ── OCR EXTRACT ───────────────────────────────────────────
+// ── OCR EXTRACT — single pass ────────────────────────────
 async function ocrExtract(item) {
   try {
     const img = await loadImage(item.dataUrl);
-
-    // Scan jobs: each targets a specific region/purpose with tuned params
-    // mode: 'auto'=PSM3 full page, 'block'=PSM6 uniform block, 'sparse'=PSM11 sparse text
-    const jobs = [
-      // ① Full image — auto layout detection (PSM 3), softer binarization
-      { mode:'auto', opts:{ rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:1.5, brightness:1.05, binarize:true } },
-      // ② Full image — high contrast (catches faded prints)
-      { mode:'auto', opts:{ rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:2.0, brightness:1.1, binarize:true } },
-      // ③ Full image — inverted (white-on-dark regions)
-      { mode:'auto', opts:{ rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:1.8, brightness:1.0, invert:true, binarize:true } },
-      // ④ Top half — header area (BF code, COD territorial, campaña) — PSM 6 uniform block
-      { mode:'block', opts:{ rx:0, ry:0, rw:1, rh:0.50, scale:3.0, contrast:1.8, brightness:1.05, binarize:true } },
-      // ⑤ Top-right — BF/pedido number zone — PSM 11 sparse (number may be isolated)
-      { mode:'sparse', opts:{ rx:0.45, ry:0.0, rw:0.55, rh:0.28, scale:4.5, contrast:2.2, brightness:1.1, binarize:true } },
-      // ⑥ Top-right alternate — slightly wider/taller if BF is lower
-      { mode:'sparse', opts:{ rx:0.40, ry:0.0, rw:0.60, rh:0.38, scale:4.0, contrast:2.0, brightness:1.1, binarize:true } },
-      // ⑦ Center — COD consultora (99...) — PSM 6
-      { mode:'block', opts:{ rx:0.20, ry:0.25, rw:0.60, rh:0.32, scale:4.0, contrast:2.0, brightness:1.1, binarize:true } },
-      // ⑧ Left/center — CAMPAÑA field — PSM 6
-      { mode:'block', opts:{ rx:0.0, ry:0.25, rw:0.50, rh:0.28, scale:4.0, contrast:1.8, brightness:1.05, binarize:true } },
-      // ⑨ Bottom half — zona territorial (often in lower section) — PSM 3
-      { mode:'auto', opts:{ rx:0, ry:0.45, rw:1, rh:0.55, scale:3.0, contrast:1.7, brightness:1.05, binarize:true } },
-      // ⑩ No binarization pass — raw enhanced (catches light-gray prints binarize kills)
-      { mode:'auto', opts:{ rx:0, ry:0, rw:1, rh:1, scale:2.5, contrast:2.5, brightness:1.15, binarize:false } },
-    ];
-
-    const allTexts = [];
-    for (const job of jobs) {
-      try {
-        const worker = await getOCRWorker(job.mode);
-        const canvas = buildCanvas(img, job.opts);
-        const { data: { text } } = await worker.recognize(canvas);
-        if (text && text.trim()) allTexts.push(text);
-      } catch(e) { /* continue on job failure */ }
-    }
-
-    const combined = allTexts.join('\n');
-    parseOCRText(item, combined, allTexts);
-
+    const worker = await getOCRWorker();
+    const canvas = prepareCanvas(img);
+    const { data: { text } } = await worker.recognize(canvas);
+    parseOCRText(item, text);
     const hasRequired = item.consultora && item.pedido;
     item.status = hasRequired
       ? (item.campana && item.zona ? 'done' : 'warning')
       : 'warning';
-
   } catch(err) {
     console.warn('OCR error:', err);
     item.status = 'warning';
@@ -720,148 +669,116 @@ async function ocrExtract(item) {
 }
 
 // ── PARSE OCR TEXT ────────────────────────────────────────
-function parseOCRText(item, combined, allTexts) {
-  const lines = combined.split('\n').map(l => l.trim()).filter(Boolean);
-
-  // Helper: strip all non-digits
+function parseOCRText(item, text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
   const digits = s => s.replace(/\D/g, '');
+  // Normalize common OCR digit confusions in number-heavy context:
+  // O→0, I/l→1, S→5, B→8, Z→2, G→6
+  const fixDigits = s => s.replace(/O/g,'0').replace(/[Il]/g,'1').replace(/S/g,'5').replace(/B/g,'8').replace(/Z/g,'2').replace(/G/g,'6');
 
-  // ── 1. Nº PEDIDO ─────────────────────────────────────────
-  // 10 dígitos empezando por 26. A veces precedido de "BF", "BF-", "BF ."
+  // Helper: extract all clean digit runs from a string
+  const numRuns = s => {
+    const fixed = fixDigits(s);
+    return (fixed.match(/\d+/g) || []);
+  };
+
+  // ── 1. Nº PEDIDO — 10 digits starting with 26 ────────────
   if (!item.pedido) {
-    // Priority: BF prefix match (most reliable signal)
-    const bfMatch = combined.match(/B\s*[F\.]\s*[-\.\s]*([0-9\s]{8,14})/gi);
-    if (bfMatch) {
-      for (const m of bfMatch) {
-        const d = digits(m);
-        // Extract the trailing 10-digit number starting with 26
+    // BF prefix (most reliable)
+    const bfM = text.match(/B\s*[F.]\s*[-. ]*([0-9OIlSBZG ]{8,16})/i);
+    if (bfM) {
+      const d = digits(fixDigits(bfM[1]));
+      if (d.length >= 10) {
         const sub = d.match(/26\d{8}/);
-        if (sub) { item.pedido = sub[0]; break; }
+        if (sub) item.pedido = sub[0];
+        else if (d.startsWith('26') && d.length === 10) item.pedido = d;
       }
     }
   }
   if (!item.pedido) {
-    // Scan every sequence of digits in combined text
-    const allNums = combined.match(/\d[\d\s]{7,13}\d/g) || [];
-    for (const raw of allNums) {
-      const d = digits(raw);
-      if (d.length === 10 && d.startsWith('26')) { item.pedido = d; break; }
+    // Scan all lines for 10-digit runs starting with 26
+    for (const line of lines) {
+      for (const run of numRuns(line)) {
+        if (run.length === 10 && run.startsWith('26')) { item.pedido = run; break; }
+      }
+      if (item.pedido) break;
     }
   }
   if (!item.pedido) {
-    // Looser: any 10-digit run starting with 26 (even embedded in longer strings)
-    const m = combined.match(/\b26\d{8}\b/);
-    if (m) item.pedido = m[0];
-  }
-  if (!item.pedido) {
-    // Last resort: 26 followed by any 8 digits with possible OCR noise chars between
-    const m = combined.match(/2\s*6\s*(\d[\s\d]{6,10}\d)/);
-    if (m) {
-      const d = '26' + digits(m[1]);
-      if (d.length === 10) item.pedido = d;
+    // Try joining adjacent short runs on same line (OCR splits numbers)
+    for (const line of lines) {
+      const runs = numRuns(line);
+      for (let i = 0; i < runs.length - 1; i++) {
+        const joined = runs[i] + runs[i+1];
+        if (joined.length === 10 && joined.startsWith('26')) { item.pedido = joined; break; }
+      }
+      if (item.pedido) break;
     }
   }
 
-  // ── 2. ID CONSULTORA ──────────────────────────────────────
-  // 10 dígitos empezando por 99
+  // ── 2. ID CONSULTORA — 10 digits starting with 99 ────────
   if (!item.consultora) {
-    // Priority: COD label + 99XXXXXXXX
-    const codMatch = combined.match(/COD[EI]?\s*[:\.#]?\s*(9\s*9[\s\d]{7,12}\d)/i);
-    if (codMatch) {
-      const d = digits(codMatch[1]);
+    const codM = text.match(/C[O0]D\s*[:.]?\s*([0-9OIlSBZG ]{9,14})/i);
+    if (codM) {
+      const d = digits(fixDigits(codM[1]));
       if (d.length === 10 && d.startsWith('99')) item.consultora = d;
     }
   }
   if (!item.consultora) {
-    // Any 10-digit sequence starting with 99
-    const allNums = combined.match(/\d[\d\s]{7,13}\d/g) || [];
-    for (const raw of allNums) {
-      const d = digits(raw);
-      if (d.length === 10 && d.startsWith('99')) { item.consultora = d; break; }
+    for (const line of lines) {
+      for (const run of numRuns(line)) {
+        if (run.length === 10 && run.startsWith('99')) { item.consultora = run; break; }
+      }
+      if (item.consultora) break;
     }
   }
   if (!item.consultora) {
-    const m = combined.match(/\b99\d{8}\b/);
-    if (m) item.consultora = m[0];
-  }
-  if (!item.consultora) {
-    // OCR sometimes splits: 99 then space then 8 digits
-    const m = combined.match(/9\s*9\s*(\d[\s\d]{6,10}\d)/);
-    if (m) {
-      const d = '99' + digits(m[1]);
-      if (d.length === 10) item.consultora = d;
+    for (const line of lines) {
+      const runs = numRuns(line);
+      for (let i = 0; i < runs.length - 1; i++) {
+        const joined = runs[i] + runs[i+1];
+        if (joined.length === 10 && joined.startsWith('99')) { item.consultora = joined; break; }
+      }
+      if (item.consultora) break;
     }
   }
 
-  // ── 3. CAMPAÑA ────────────────────────────────────────────
-  // 6 dígitos empezando por 20 (e.g. 202607)
-  if (!item.campana) {
-    // Near CAMPA label — same or next line
-    const campMatch = combined.match(/CAMPA[^\n]{0,15}?(\b20\d{4}\b)/i);
-    if (campMatch) item.campana = campMatch[1];
-  }
+  // ── 3. CAMPAÑA — 6 digits starting with 20 ───────────────
   if (!item.campana) {
     for (let i = 0; i < lines.length; i++) {
-      if (/CAMPA/i.test(lines[i])) {
-        // Check same line
-        const same = lines[i].match(/\b(20\d{4})\b/);
-        if (same) { item.campana = same[1]; break; }
-        // Check next 2 lines
-        for (let j = 1; j <= 2; j++) {
-          if (!lines[i+j]) continue;
-          const nxt = lines[i+j].match(/\b(20\d{4})\b/);
-          if (nxt) { item.campana = nxt[1]; break; }
+      if (/CAMP/i.test(lines[i])) {
+        // Same line or next 2
+        const candidates = [lines[i], lines[i+1]||'', lines[i+2]||''].join(' ');
+        for (const run of numRuns(candidates)) {
+          if (run.length === 6 && run.startsWith('20')) { item.campana = run; break; }
         }
         if (item.campana) break;
       }
     }
   }
   if (!item.campana) {
-    // Standalone 6-digit number starting with 20 (but not confused with pedido/consultora)
-    const m = combined.match(/(?<!\d)(20\d{4})(?!\d)/);
-    if (m) item.campana = m[1];
+    // Any standalone 6-digit 20XXXX not part of longer number
+    for (const line of lines) {
+      for (const run of numRuns(line)) {
+        if (run.length === 6 && run.startsWith('20')) { item.campana = run; break; }
+      }
+      if (item.campana) break;
+    }
   }
 
   // ── 4. ZONA TERRITORIAL ───────────────────────────────────
-  // Formato típico: "141409E 21084" o "1614210 21802" o "141421C 21802"
-  // Estructura: 5-7 alfanuméricos + espacio + 4-6 dígitos
   if (!item.zona) {
-    // Near TERRITORIAL label
-    const tMatch = combined.match(/TERRITORIAL[\s:\.]*([A-Z0-9]{4,9}[\s\-]+[0-9]{4,6})/i);
-    if (tMatch) item.zona = tMatch[1].replace(/\s+/g,' ').trim();
-  }
-  if (!item.zona) {
-    // Near COD TERRITORIAL — number may be on next line
     for (let i = 0; i < lines.length; i++) {
-      if (/TERRITORIAL/i.test(lines[i])) {
-        // Try same line first
-        const same = lines[i].match(/([A-Z0-9]{4,9}\s+[0-9]{4,6})/i);
-        if (same) { item.zona = same[1].replace(/\s+/g,' ').trim(); break; }
-        // Try next line (zona may be split onto next line)
-        if (lines[i+1]) {
-          const nxt = lines[i+1].match(/^([A-Z0-9]{4,9}(?:\s+[0-9]{4,6})?)/i);
-          if (nxt) {
-            // If the next line only has first part, grab the one after too
-            let zona = nxt[1].replace(/\s+/g,' ').trim();
-            if (!/\s/.test(zona) && lines[i+2]) {
-              const nxt2 = lines[i+2].match(/^([0-9]{4,6})/);
-              if (nxt2) zona += ' ' + nxt2[1];
-            }
-            item.zona = zona; break;
-          }
-        }
+      if (/TERRIT/i.test(lines[i])) {
+        const candidates = lines[i] + ' ' + (lines[i+1]||'') + ' ' + (lines[i+2]||'');
+        const zm = candidates.match(/([A-Z0-9]{4,9}\s+[0-9]{4,6})/i);
+        if (zm) { item.zona = zm[1].replace(/\s+/g,' ').trim(); break; }
       }
     }
   }
   if (!item.zona) {
-    // Pattern: digits+optional letter(s) + space + digits (typical zona format)
-    const zonaRaw = combined.match(/\b(\d{5,7}[A-Z]{0,2}\s+\d{4,6})\b/i);
-    if (zonaRaw) item.zona = zonaRaw[1].replace(/\s+/g,' ').trim();
-  }
-  if (!item.zona) {
-    // Alphanumeric code with embedded letter: e.g. 141421C 21802
-    const zonaRaw2 = combined.match(/\b([0-9]{4,6}[A-Z][A-Z]?\s+[0-9]{4,6})\b/i);
-    if (zonaRaw2) item.zona = zonaRaw2[1].replace(/\s+/g,' ').trim();
+    const zm = text.match(/\b(\d{5,7}[A-Z]{0,2}\s+\d{4,6})\b/i);
+    if (zm) item.zona = zm[1].replace(/\s+/g,' ').trim();
   }
 }
 
@@ -882,36 +799,27 @@ async function saveAll(){
   let cnt=0,errs=0;
   for(const item of toSave){
     const fecha=new Date().toLocaleString('es-CO',{timeZone:'America/Bogota'});
-    document.getElementById('sstatus').textContent='Subiendo '+(cnt+1)+'/'+toSave.length+': '+item.file.name+'…';
-    // Extract base64 data (remove data:image/xxx;base64, prefix)
+    document.getElementById('sstatus').textContent='Subiendo '+(cnt+1)+'/'+toSave.length+': '+item.file.name+'\u2026';
     const b64=item.dataUrl.split(',')[1];
     const mimeType=item.dataUrl.split(';')[0].split(':')[1];
     const payload={
       action:'saveBoletaWithPhoto',
-      campana:item.campana,
-      consultora:item.consultora,
-      pedido:item.pedido,
-      zona:item.zona,
-      fecha,
-      fileName:item.file.name,
-      mimeType,
-      imageBase64:b64,
-      folderId:cfg.du||''
+      campana:item.campana,consultora:item.consultora,pedido:item.pedido,zona:item.zona,fecha,
+      fileName:item.file.name,mimeType,imageBase64:b64,folderId:cfg.du||''
     };
     let urlFoto='— (error al subir)';
     try{
       const resp=await fetch(cfg.su,{method:'POST',headers:{'Content-Type':'text/plain'},body:JSON.stringify(payload)});
       const json=await resp.json();
       if(json.ok && json.urlFoto) urlFoto=json.urlFoto;
-      else if(json.error) console.warn('Apps Script error:',json.error);
-    }catch(e){console.warn('Error al guardar boleta:',e);errs++;}
+    }catch(e){errs++;}
     records.unshift({campana:item.campana,consultora:item.consultora,pedido:item.pedido,zona:item.zona,fecha,urlFoto,imageData:item.dataUrl,fileName:item.file.name});
     item.status='saved';updQI(item);cnt++;
   }
   localStorage.setItem('b_rec',JSON.stringify(records));
   updSidebarStats();updSum();
-  const msg=cnt+' boletas guardadas'+(errs?' ('+errs+' con error)':' — foto en Drive y URL en Sheets ✓');
-  document.getElementById('sstatus').textContent='✓ '+msg;
+  const msg=cnt+' boletas guardadas'+(errs?' ('+errs+' con error)':' — foto en Drive y URL en Sheets \u2713');
+  document.getElementById('sstatus').textContent='\u2713 '+msg;
   notify(msg,errs?'warn':'ok');
   document.getElementById('bsa').disabled=false;
 }
@@ -924,8 +832,8 @@ function renderT(filter){
   if(filter){const q=filter.toLowerCase();list=records.filter(r=>{if(field==='consultora')return r.consultora?.includes(filter);if(field==='pedido')return r.pedido?.includes(filter);if(field==='campana')return r.campana?.includes(filter);if(field==='zona')return r.zona?.toLowerCase().includes(q);return Object.values(r).some(v=>String(v).toLowerCase().includes(q));});}
   document.getElementById('rcnt').textContent=records.length+' boletas registradas';
   document.getElementById('filter-count').textContent=filter?('mostrando '+list.length):'';
-  if(!list.length){tbody.innerHTML=`<tr><td colspan="6"><div class="empty-state"><div class="eicon">${filter?'⌕':'▦'}</div><div>${filter?'Sin resultados para "'+filter+'"':'No hay registros aún'}</div></div></td></tr>`;return;}
-  tbody.innerHTML=list.map(r=>`<tr onclick="showD(${records.indexOf(r)})"><td class="cm">${r.campana||'—'}</td><td class="ca">${r.consultora||'—'}</td><td>${r.pedido||'—'}</td><td class="cm">${r.zona||'—'}</td><td class="cm">${r.fecha||'—'}</td><td class="cl">${r.urlFoto&&r.urlFoto.startsWith('http')?'<a href="'+r.urlFoto+'" target="_blank" onclick="event.stopPropagation()">📎 Drive</a>':(r.imageData?'<a href="'+r.imageData+'" target="_blank" onclick="event.stopPropagation()">Ver foto</a>':'—')}</td></tr>`).join('');
+  if(!list.length){tbody.innerHTML=`<tr><td colspan="6"><div class="empty-state"><div class="eicon">${filter?'\u2315':'\u25a6'}</div><div>${filter?'Sin resultados para "'+filter+'"':'No hay registros aún'}</div></div></td></tr>`;return;}
+  tbody.innerHTML=list.map(r=>`<tr onclick="showD(${records.indexOf(r)})"><td class="cm">${r.campana||'\u2014'}</td><td class="ca">${r.consultora||'\u2014'}</td><td>${r.pedido||'\u2014'}</td><td class="cm">${r.zona||'\u2014'}</td><td class="cm">${r.fecha||'\u2014'}</td><td class="cl">${r.urlFoto&&r.urlFoto.startsWith('http')?'<a href="'+r.urlFoto+'" target="_blank" onclick="event.stopPropagation()">\ud83d\udcce Drive</a>':(r.imageData?'<a href="'+r.imageData+'" target="_blank" onclick="event.stopPropagation()">Ver foto</a>':'\u2014')}</td></tr>`).join('');
 }
 function filterR(){renderT(document.getElementById('sq').value.trim());}
 function updSidebarStats(){document.getElementById('sb-count').textContent=records.length;}
@@ -934,7 +842,7 @@ function updSidebarStats(){document.getElementById('sb-count').textContent=recor
 function showD(idx){
   const r=records[idx];
   document.getElementById('mimg').src=r.imageData||'';document.getElementById('mimg').style.display=r.imageData?'block':'none';
-  document.getElementById('mfields').innerHTML=`<div class="mdi"><div class="lb">Campaña</div><div class="vl">${r.campana||'—'}</div></div><div class="mdi"><div class="lb">ID Consultora</div><div class="vl">${r.consultora||'—'}</div></div><div class="mdi"><div class="lb">Nº Pedido</div><div class="vl">${r.pedido||'—'}</div></div><div class="mdi"><div class="lb">Zona</div><div class="vl" style="color:var(--text)">${r.zona||'—'}</div></div><div class="mdi" style="grid-column:1/-1"><div class="lb">Fecha registro</div><div class="vl" style="color:var(--text);font-size:11px">${r.fecha||'—'}</div></div>`;
+  document.getElementById('mfields').innerHTML=`<div class="mdi"><div class="lb">Campa\u00f1a</div><div class="vl">${r.campana||'\u2014'}</div></div><div class="mdi"><div class="lb">ID Consultora</div><div class="vl">${r.consultora||'\u2014'}</div></div><div class="mdi"><div class="lb">N\u00ba Pedido</div><div class="vl">${r.pedido||'\u2014'}</div></div><div class="mdi"><div class="lb">Zona</div><div class="vl" style="color:var(--text)">${r.zona||'\u2014'}</div></div><div class="mdi" style="grid-column:1/-1"><div class="lb">Fecha registro</div><div class="vl" style="color:var(--text);font-size:11px">${r.fecha||'\u2014'}</div></div>`;
   document.getElementById('mo').classList.add('open');
 }
 function showImgModal(id){
@@ -947,7 +855,7 @@ function closeMo(){document.getElementById('mo').classList.remove('open');}
 
 // CONFIG
 function saveCfg(){cfg.su=document.getElementById('cfg-su').value.trim();cfg.du=document.getElementById('cfg-du').value.trim();localStorage.setItem('b_cfg',JSON.stringify(cfg));}
-function copyScript(){navigator.clipboard.writeText(document.getElementById('scode').textContent).then(()=>notify('Código copiado ✓','ok'));}
+function copyScript(){navigator.clipboard.writeText(document.getElementById('scode').textContent).then(()=>notify('Código copiado \u2713','ok'));}
 
 // NOTIFY
 function notify(msg,type){const el=document.getElementById('notif');el.textContent=msg;el.className='show '+(type||'ok');setTimeout(()=>el.classList.remove('show'),3800);}
