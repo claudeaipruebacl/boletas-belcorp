@@ -518,16 +518,15 @@ async function processQ() {
   prog.style.display = 'block';
   let done = 0;
 
-  // Initialize worker once before processing
+  // Initialize worker once
   await getOCRWorker();
 
-  // Process all in parallel (max 3 at a time to avoid memory issues)
-  const BATCH = 3;
-  for (let i = 0; i < pending.length; i += BATCH) {
-    const batch = pending.slice(i, i + BATCH);
-    batch.forEach(item => { item.status = 'scanning'; updQI(item); });
-    await Promise.all(batch.map(item => ocrExtract(item)));
-    done += batch.length;
+  // Process sequentially — OCR worker is single-threaded (WASM), parallel calls queue anyway
+  // Sequential gives cleaner progress feedback and avoids memory spikes
+  for (const item of pending) {
+    item.status = 'scanning'; updQI(item);
+    await ocrExtract(item);
+    done++;
     pf.style.width = Math.round((done / pending.length) * 100) + '%';
   }
 
@@ -561,81 +560,63 @@ let ocrWorker = null;
 
 async function getOCRWorker() {
   if (ocrWorker) return ocrWorker;
-  // Use 'eng' model — more reliable for digit sequences than 'spa'
-  ocrWorker = await Tesseract.createWorker('eng', 1, { logger: () => {} });
+  // OEM 0 = legacy engine only — much faster for digit sequences, no diacritics noise
+  ocrWorker = await Tesseract.createWorker('eng', 0, { logger: () => {} });
   await ocrWorker.setParameters({
-    // Only digits + letters needed for codes; drastically reduces search space = faster + more accurate
-    tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz:.- /',
-    tessedit_pageseg_mode: '3',       // PSM 3: auto layout — best for mixed documents
-    tessedit_ocr_engine_mode: '1',    // OEM 1: LSTM only — faster and more accurate than legacy
-    preserve_interword_spaces: '1',
+    tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ:.- /',
+    tessedit_pageseg_mode: '6',   // PSM 6: uniform block of text — fastest for structured docs
+    tessedit_ocr_engine_mode: '0', // OEM 0: legacy — fast, digit-accurate
+    preserve_interword_spaces: '0',
+    load_system_dawg: '0',        // disable dictionary — not needed for codes
+    load_freq_dawg: '0',
   });
   return ocrWorker;
 }
 
-// ── IMAGE PREPROCESSING — single optimized pass ───────────
-// Sharpens, scales, binarizes. Tuned for printed numeric codes.
+// ── IMAGE PREPROCESSING — fast, tuned for printed boletas ──
 function prepareCanvas(img) {
   const W = img.naturalWidth, H = img.naturalHeight;
-  // Scale to ~2400px wide for good OCR without being too large
-  const scale = Math.min(Math.max(2400 / W, 1.5), 4.0);
+  // Scale: target ~1800px wide — enough for Tesseract, not too heavy for CPU
+  const scale = Math.min(Math.max(1800 / W, 1.0), 3.0);
   const outW = Math.round(W * scale), outH = Math.round(H * scale);
 
   const c = document.createElement('canvas');
   c.width = outW; c.height = outH;
   const ctx = c.getContext('2d', { willReadFrequently: true });
 
-  // White background
+  // Step 1: Draw grayscale + high contrast (CSS filter is GPU-accelerated)
   ctx.fillStyle = '#fff';
   ctx.fillRect(0, 0, outW, outH);
-
-  // Draw with contrast + grayscale boost
-  ctx.filter = 'grayscale(1) contrast(1.8) brightness(1.05)';
+  ctx.filter = 'grayscale(1) contrast(2.2) brightness(1.1)';
   ctx.drawImage(img, 0, 0, outW, outH);
   ctx.filter = 'none';
 
-  // Adaptive binarization with 3x3 unsharp mask pass first
+  // Step 2: Global Otsu binarization — fast O(n), very effective for printed docs
   const id = ctx.getImageData(0, 0, outW, outH);
   const d = id.data;
+  const n = outW * outH;
 
-  // 1. Convert to grayscale array
-  const gray = new Uint8Array(outW * outH);
+  // Build histogram (use only red channel — already grayscale)
+  const hist = new Int32Array(256);
+  for (let i = 0; i < d.length; i += 4) hist[d[i]]++;
+
+  // Otsu threshold
+  let sum = 0;
+  for (let i = 0; i < 256; i++) sum += i * hist[i];
+  let sumB = 0, wB = 0, wF = 0, maxVar = 0, threshold = 128;
+  for (let t = 0; t < 256; t++) {
+    wB += hist[t]; if (!wB) continue;
+    wF = n - wB; if (!wF) break;
+    sumB += t * hist[t];
+    const mB = sumB / wB, mF = (sum - sumB) / wF;
+    const v = wB * wF * (mB - mF) * (mB - mF);
+    if (v > maxVar) { maxVar = v; threshold = t; }
+  }
+
+  // Apply threshold — pixels below = black (ink), above = white (paper)
   for (let i = 0; i < d.length; i += 4) {
-    gray[i >> 2] = (d[i] * 77 + d[i+1] * 150 + d[i+2] * 29) >> 8;
-  }
-
-  // 2. Compute integral image for fast mean calculation
-  const integ = new Float64Array((outW + 1) * (outH + 1));
-  for (let y = 1; y <= outH; y++) {
-    for (let x = 1; x <= outW; x++) {
-      integ[y * (outW+1) + x] =
-        gray[(y-1) * outW + (x-1)]
-        + integ[(y-1) * (outW+1) + x]
-        + integ[y * (outW+1) + (x-1)]
-        - integ[(y-1) * (outW+1) + (x-1)];
-    }
-  }
-
-  // 3. Sauvola-like binarization using integral image (fast O(1) per pixel)
-  const R = Math.round(outW * 0.02);  // ~2% of width as window radius
-  const k = 0.12;
-  for (let y = 0; y < outH; y++) {
-    for (let x = 0; x < outW; x++) {
-      const x1 = Math.max(0, x - R), y1 = Math.max(0, y - R);
-      const x2 = Math.min(outW - 1, x + R), y2 = Math.min(outH - 1, y + R);
-      const area = (x2 - x1 + 1) * (y2 - y1 + 1);
-      const sum = integ[(y2+1)*(outW+1)+(x2+1)]
-                - integ[y1*(outW+1)+(x2+1)]
-                - integ[(y2+1)*(outW+1)+x1]
-                + integ[y1*(outW+1)+x1];
-      const mean = sum / area;
-      // Simplified Sauvola: threshold = mean * (1 - k)
-      const thresh = mean * (1 - k);
-      const px = (y * outW + x) * 4;
-      const val = gray[y * outW + x] < thresh ? 0 : 255;
-      d[px] = d[px+1] = d[px+2] = val;
-      d[px+3] = 255;
-    }
+    const v = d[i] < threshold ? 0 : 255;
+    d[i] = d[i+1] = d[i+2] = v; d[i+3] = 255;
   }
   ctx.putImageData(id, 0, 0);
   return c;
