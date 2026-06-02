@@ -560,15 +560,23 @@ let ocrWorker = null;
 
 async function getOCRWorker() {
   if (ocrWorker) return ocrWorker;
-  // OEM 0 = legacy engine only — much faster for digit sequences, no diacritics noise
-  ocrWorker = await Tesseract.createWorker('eng', 0, { logger: () => {} });
+  // OEM must be passed as 2nd arg to createWorker, NOT in setParameters (Tesseract.js 5 constraint)
+  // OEM 0 = legacy engine — fastest for digit sequences, no diacritics warnings
+  ocrWorker = await Tesseract.createWorker('eng', 0, {
+    logger: () => {},
+    errorHandler: () => {},
+  });
+  // Only set params that are safe post-init (NOT ocr_engine_mode)
   await ocrWorker.setParameters({
     tessedit_char_whitelist: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ:.- /',
-    tessedit_pageseg_mode: '6',   // PSM 6: uniform block of text — fastest for structured docs
-    tessedit_ocr_engine_mode: '0', // OEM 0: legacy — fast, digit-accurate
+    tessedit_pageseg_mode: '6',
     preserve_interword_spaces: '0',
-    load_system_dawg: '0',        // disable dictionary — not needed for codes
+    load_system_dawg: '0',
     load_freq_dawg: '0',
+    load_unambig_dawg: '0',
+    load_punc_dawg: '0',
+    load_number_dawg: '0',
+    load_bigram_dawg: '0',
   });
   return ocrWorker;
 }
